@@ -435,14 +435,21 @@ function resolveAlias(name) {
 function getGPS(timeoutMs) {
   return new Promise(resolve => {
     if (!navigator.geolocation) { resolve(null); return; }
-    navigator.geolocation.getCurrentPosition(
-      p => {
-        state.myLoc = { lat: p.coords.latitude, lng: p.coords.longitude };
-        resolve(state.myLoc);
-      },
-      () => resolve(null),
-      { enableHighAccuracy: true, timeout: timeoutMs || 8000, maximumAge: 30000 }
-    );
+    let done = false;
+    const ok = p => {
+      if (done) return; done = true;
+      const acc = Math.round(p.coords.accuracy || 9999);
+      if (acc > 500) toast('GPS 정확도가 낮아요(±' + acc + 'm). 실내라면 창가 쪽으로 이동해보세요');
+      state.myLoc = { lat: p.coords.latitude, lng: p.coords.longitude, acc: acc };
+      resolve(state.myLoc);
+    };
+    const fail = () => { if (done) return; done = true; resolve(null); };
+    const retry = () => navigator.geolocation.getCurrentPosition(ok, fail,
+      { enableHighAccuracy: true, timeout: 25000, maximumAge: 0 });
+    // 1차: 빠른 측정. 정확도가 나쁘면(300m 초과) 한 번 더 정밀 측량
+    navigator.geolocation.getCurrentPosition(p => {
+      if ((p.coords.accuracy || 9999) <= 300) ok(p); else retry();
+    }, retry, { enableHighAccuracy: true, timeout: timeoutMs || 8000, maximumAge: 0 });
   });
 }
 
@@ -479,9 +486,16 @@ function parseCommand(text) {
 }
 
 /* ================= 경로 탐색 (OSRM) ================= */
+// 차: OSRM 공개 서버(자동차 전용). 도보/자전거: FOSSGIS OSRM foot/bike 전용 인스턴스
+// (주의: router.project-osrm.org는 도보/자전거 요청에도 자동차 경로를 반환하므로 분리함)
+const ROUTE_HOST = {
+  car: 'https://router.project-osrm.org',
+  walk: 'https://routing.openstreetmap.de/routed-foot',
+  bike: 'https://routing.openstreetmap.de/routed-bike'
+};
 async function fetchRoute(from, to, mode) {
-  const profile = { car: 'driving', walk: 'walking', bike: 'cycling' }[mode] || 'walking';
-  const url = 'https://router.project-osrm.org/route/v1/' + profile + '/' +
+  const host = ROUTE_HOST[mode] || ROUTE_HOST.walk;
+  const url = host + '/route/v1/driving/' +
     from.lng + ',' + from.lat + ';' + to.lng + ',' + to.lat +
     '?overview=full&geometries=geojson&steps=true';
   const r = await fetch(url);
