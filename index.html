@@ -439,11 +439,36 @@ function stationBaseName(name) {
   const m = String(name || '').match(/^(.*역)/);
   return m ? m[1] : name;
 }
+/* TMap POI 통합검색 (지하철 출구 등 한국 POI 데이터용) */
+async function tmapPoiSearch(keyword, center) {
+  const tkey = (localStorage.getItem('tmap_key') || TMAP_DEFAULT_KEY || '').trim();
+  if (!tkey) return [];
+  try {
+    let url = 'https://apis.openapi.sk.com/tmap/pois?version=1&format=json&count=20' +
+      '&searchKeyword=' + encodeURIComponent(keyword) +
+      '&resCoordType=WGS84GEO&reqCoordType=WGS84GEO&searchType=all';
+    if (center) url += '&centerLon=' + center.lng + '&centerLat=' + center.lat + '&radius=3';
+    const r = await fetch(url, { headers: { appKey: tkey } });
+    const j = await r.json();
+    const pois = (((j || {}).searchPoiInfo || {}).pois || {}).poi || [];
+    const arr = Array.isArray(pois) ? pois : [pois];
+    return arr
+      .map(p => ({ lat: +p.noorLat, lng: +p.noorLon, name: p.name || '' }))
+      .filter(p => p.lat && p.lng && p.name);
+  } catch (e) { return []; }
+}
 async function nearestExit(station, ref) {
   try {
-    if (!(state.kakaoReady && state.adapter instanceof KakaoAdapter)) return null;
-    const list = await state.adapter.searchKeywordList(stationBaseName(station.name) + ' 출구', { lat: station.lat, lng: station.lng }, 15);
-    const exits = (list || []).filter(e => e.name && e.name.includes('출구'));
+    const q = stationBaseName(station.name) + ' 출구';
+    const ctr = { lat: station.lat, lng: station.lng };
+    let exits = [];
+    // 1) TMap POI 우선 (한국 지하철 출구 데이터가 가장 정확)
+    exits = (await tmapPoiSearch(q, ctr)).filter(e => e.name.includes('출구'));
+    // 2) 폴백: 카카오 장소 검색
+    if (!exits.length && state.kakaoReady && state.adapter instanceof KakaoAdapter) {
+      const list = await state.adapter.searchKeywordList(q, ctr, 15);
+      exits = (list || []).filter(e => e.name && e.name.includes('출구'));
+    }
     if (!exits.length) return null;
     let best = null, bestD = Infinity;
     for (const e of exits) {
