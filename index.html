@@ -18,7 +18,8 @@
 html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
   font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR",sans-serif;
   overscroll-behavior:none}
-#map{position:fixed;inset:0;z-index:0;background:#0d0d0d}
+#map{position:fixed;inset:0;z-index:0;background:#0d0d0d;transition:transform .25s linear}
+#map.rot{inset:-25%} /* 진행방향 모드: 회전 시 모서리가 비지 않도록 150%로 확대 */
 .leaflet-container{background:#0d0d0d;font-family:inherit}
 
 /* 상단 검색바 */
@@ -38,6 +39,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
   box-shadow:0 2px 14px rgba(255,159,10,.45)}
 .micbtn.listening{animation:pulse 1.1s ease-in-out infinite;background:var(--red)}
 @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.12)}}
+.micbtn svg{display:block}
 .setbtn{position:fixed;z-index:20;left:12px;bottom:calc(18px + env(safe-area-inset-bottom))}
 
 /* 나침반 */
@@ -56,6 +58,21 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 
 /* 현재위치 버튼 */
 .locbtn{position:fixed;z-index:20;right:12px;bottom:calc(18px + env(safe-area-inset-bottom))}
+
+/* 경로 지우기 버튼 */
+.clearbtn{position:fixed;z-index:20;right:12px;top:calc(158px + env(safe-area-inset-top));display:none}
+.clearbtn.on{display:flex}
+
+/* 최근 검색 내역 */
+#history{position:fixed;z-index:30;top:calc(66px + env(safe-area-inset-top));left:12px;right:78px;
+  display:none;background:#1c1c1e;border:1px solid var(--line);border-radius:14px;
+  max-height:38vh;overflow:auto;box-shadow:0 8px 30px rgba(0,0,0,.55)}
+#history.on{display:block}
+#history .hrow{display:flex;align-items:center;gap:8px;padding:12px 14px;
+  border-bottom:1px solid #2c2c2e;font-size:14px;color:#fff;cursor:pointer}
+#history .hrow .htxt{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#history .hmode{font-size:11px;color:var(--accent);flex-shrink:0}
+#history .hclear{padding:10px 14px;font-size:12px;color:#8e8e93;text-align:center;cursor:pointer}
 
 /* 하단 시트 */
 .sheet{position:fixed;left:0;right:0;bottom:0;z-index:30;background:var(--panel);
@@ -140,7 +157,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
     <input id="cmdInput" type="text" placeholder="&quot;강남역까지 걸어서&quot; 말하거나 입력" autocomplete="off">
     <button class="iconbtn" id="searchBtn" title="검색">🔍</button>
   </div>
-  <button class="micbtn" id="micBtn" title="음성 명령">🎤</button>
+  <button class="micbtn" id="micBtn" title="음성 명령" aria-label="음성 명령"><svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor" aria-hidden="true"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.91-3c-.49 0-.9.36-.98.85C16.52 14.2 14.47 16 12 16s-4.52-1.8-4.93-4.15c-.08-.49-.49-.85-.98-.85-.61 0-1.09.54-1 1.14.49 3 2.89 5.35 5.91 5.78V20c0 .55.45 1 1 1s1-.45 1-1v-2.08c3.02-.43 5.42-2.78 5.91-5.78.1-.6-.39-1.14-1-1.14z"/></svg></button>
 </div>
 
 <div class="compass" id="compass" title="나침반 (탭: 북쪽고정/진행방향)">
@@ -157,6 +174,8 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 
 <button class="iconbtn locbtn" id="locBtn" title="현재 위치">📍</button>
 <button class="iconbtn setbtn" id="setBtn" title="설정">⚙️</button>
+<button class="iconbtn clearbtn" id="clearBtn" title="경로 지우기">✕</button>
+<div id="history"></div>
 
 <div class="sheet" id="sheet"></div>
 
@@ -277,7 +296,7 @@ function projectPointOnSegment(p, a, b) {
 
 /* ================= 지도 어댑터 (provider 추상화) =================
    공통 인터페이스: setCenter, addMarker, clearMarkers, drawRoute, clearRoute,
-   setUserLocation, fitPoints, searchKeyword, searchAddress                     */
+   setUserLocation, fitPoints, searchKeyword, searchAddress, relayout                     */
 class KakaoAdapter {
   async init() {
     await withTimeout(new Promise((resolve, reject) => {
@@ -290,7 +309,9 @@ class KakaoAdapter {
             });
             this.places = new kakao.maps.services.Places();
             this.geocoder = new kakao.maps.services.Geocoder();
-            this.markers = []; this.polyline = null; this.userMarker = null;
+            this.markers = []; this.polyline = null; this.casing = null; this.userMarker = null;
+            this.walkLine = null; this.walkCasing = null;
+            this._routeSeq = 0;
             resolve();
           } catch (e) { reject(e); }
         });
@@ -309,14 +330,38 @@ class KakaoAdapter {
     this.markers.push(m); return m;
   }
   clearMarkers() { this.markers.forEach(m => { try { m.setMap ? m.setMap(null) : m.close(); } catch (e) {} }); this.markers = []; }
-  drawRoute(points) {
+  drawRoute(points, walkPoints) {
     this.clearRoute();
+    const seq = (this._routeSeq = (this._routeSeq || 0) + 1);
     const path = points.map(p => new kakao.maps.LatLng(p[0], p[1]));
-    this.polyline = new kakao.maps.Polyline({ path, strokeWeight: 6, strokeColor: '#ff9f0a', strokeOpacity: 0.95, strokeStyle: 'solid' });
-    this.polyline.setMap(this.map);
-    const b = new kakao.maps.LatLngBounds(); path.forEach(p => b.extend(p)); this.map.setBounds(b);
+    const b = new kakao.maps.LatLngBounds(); path.forEach(p => b.extend(p));
+    if (walkPoints && walkPoints.length > 1) walkPoints.forEach(p => b.extend(new kakao.maps.LatLng(p[0], p[1])));
+    this.map.setBounds(b);
+    // iOS 렌더 타이밍 이슈 대응: bounds 적용 후 다음 프레임에 그리고 강제 리페인트
+    requestAnimationFrame(() => {
+      if (seq !== this._routeSeq) return; // 그 사이 새 경로가 그려지면 무시
+      this.casing = new kakao.maps.Polyline({ path, strokeWeight: 11, strokeColor: '#ffffff', strokeOpacity: 0.92, strokeStyle: 'solid' });
+      this.casing.setMap(this.map);
+      this.polyline = new kakao.maps.Polyline({ path, strokeWeight: 6, strokeColor: '#ff9f0a', strokeOpacity: 1, strokeStyle: 'solid' });
+      this.polyline.setMap(this.map);
+      if (walkPoints && walkPoints.length > 1) {
+        const wpath = walkPoints.map(p => new kakao.maps.LatLng(p[0], p[1]));
+        this.walkCasing = new kakao.maps.Polyline({ path: wpath, strokeWeight: 9, strokeColor: '#ffffff', strokeOpacity: 0.9, strokeStyle: 'solid' });
+        this.walkCasing.setMap(this.map);
+        this.walkLine = new kakao.maps.Polyline({ path: wpath, strokeWeight: 5, strokeColor: '#ff9f0a', strokeOpacity: 1, strokeStyle: 'dash' });
+        this.walkLine.setMap(this.map);
+      }
+      try { this.map.relayout(); } catch (e) {}
+    });
   }
-  clearRoute() { if (this.polyline) { this.polyline.setMap(null); this.polyline = null; } }
+  clearRoute() {
+    this._routeSeq = (this._routeSeq || 0) + 1;
+    if (this.casing) { try { this.casing.setMap(null); } catch (e) {} this.casing = null; }
+    if (this.polyline) { try { this.polyline.setMap(null); } catch (e) {} this.polyline = null; }
+    if (this.walkCasing) { try { this.walkCasing.setMap(null); } catch (e) {} this.walkCasing = null; }
+    if (this.walkLine) { try { this.walkLine.setMap(null); } catch (e) {} this.walkLine = null; }
+  }
+  relayout() { try { this.map.relayout(); } catch (e) {} }
   setUserLocation(lat, lng) {
     const pos = new kakao.maps.LatLng(lat, lng);
     if (!this.userMarker) {
@@ -385,12 +430,23 @@ class LeafletAdapter {
     return m;
   }
   clearMarkers() { this.layer.clearLayers(); }
-  drawRoute(points) {
+  drawRoute(points, walkPoints) {
     this.clearRoute();
-    this.routeLayer = L.polyline(points, { color: '#ff9f0a', weight: 6, opacity: 0.95 }).addTo(this.map);
+    this.routeCasing = L.polyline(points, { color: '#ffffff', weight: 11, opacity: 0.92 }).addTo(this.map);
+    this.routeLayer = L.polyline(points, { color: '#ff9f0a', weight: 6, opacity: 1 }).addTo(this.map);
+    if (walkPoints && walkPoints.length > 1) {
+      this.walkCasing = L.polyline(walkPoints, { color: '#ffffff', weight: 9, opacity: 0.9 }).addTo(this.map);
+      this.walkLine = L.polyline(walkPoints, { color: '#ff9f0a', weight: 5, opacity: 1, dashArray: '10, 8' }).addTo(this.map);
+    }
     this.map.fitBounds(this.routeLayer.getBounds(), { padding: [40, 40] });
   }
-  clearRoute() { if (this.routeLayer) { this.map.removeLayer(this.routeLayer); this.routeLayer = null; } }
+  clearRoute() {
+    if (this.routeCasing) { this.map.removeLayer(this.routeCasing); this.routeCasing = null; }
+    if (this.routeLayer) { this.map.removeLayer(this.routeLayer); this.routeLayer = null; }
+    if (this.walkCasing) { this.map.removeLayer(this.walkCasing); this.walkCasing = null; }
+    if (this.walkLine) { this.map.removeLayer(this.walkLine); this.walkLine = null; }
+  }
+  relayout() { try { this.map.invalidateSize(); } catch (e) {} }
   setUserLocation(lat, lng) {
     if (!this.userMarker) {
       this.userMarker = L.circleMarker([lat, lng], { radius: 9, color: '#fff', weight: 3, fillColor: '#0a84ff', fillOpacity: 1 }).addTo(this.map);
@@ -487,6 +543,57 @@ function loadSavedPlaces() {
 function saveSavedPlaces() {
   try { localStorage.setItem('vnv_places', JSON.stringify(state.savedPlaces)); } catch (e) {}
 }
+
+/* ================= 최근 검색 내역 ================= */
+function getHistory() {
+  try { return JSON.parse(localStorage.getItem('vnv_history') || '[]'); }
+  catch (e) { return []; }
+}
+function saveHistory(entry) {
+  try {
+    let h = getHistory().filter(x => x.q !== entry.q);
+    h.unshift(entry);
+    h = h.slice(0, 10);
+    localStorage.setItem('vnv_history', JSON.stringify(h));
+  } catch (e) {}
+}
+function renderHistory() {
+  const box = $('history');
+  const h = getHistory();
+  if (!h.length) { box.classList.remove('on'); return; }
+  box.innerHTML = h.map((x, i) =>
+    '<div class="hrow" data-i="' + i + '"><span class="htxt">' + x.from + ' → ' + x.to + '</span>' +
+    '<span class="hmode">' + (MODE_LABEL[x.mode] || '') + '</span></div>'
+  ).join('') + '<div class="hclear" id="histClear">최근 기록 지우기</div>';
+  box.querySelectorAll('.hrow').forEach(row => {
+    row.addEventListener('mousedown', e => {
+      e.preventDefault();
+      const x = getHistory()[+row.dataset.i];
+      if (!x) return;
+      $('cmdInput').value = x.q;
+      box.classList.remove('on');
+      handleCommand(x.q);
+    });
+  });
+  const hc = $('histClear');
+  if (hc) hc.addEventListener('mousedown', e => {
+    e.preventDefault();
+    try { localStorage.removeItem('vnv_history'); } catch (e2) {}
+    box.classList.remove('on');
+  });
+  box.classList.add('on');
+}
+
+/* ================= 경로 초기화 ================= */
+function clearAll() {
+  if (nav.active) stopNavigation(true);
+  state.adapter.clearMarkers();
+  state.adapter.clearRoute();
+  closeSheet();
+  state.lastRoute = null;
+  $('clearBtn').classList.remove('on');
+  toast('경로를 지웠어요');
+}
 function resolveAlias(name) {
   if (!name) return null;
   const p = state.savedPlaces[name];
@@ -557,17 +664,21 @@ const ROUTE_HOST = {
   bike: 'https://routing.openstreetmap.de/routed-bike'
 };
 async function fetchRoute(from, to, mode) {
+  const tkey = (localStorage.getItem('tmap_key') || TMAP_DEFAULT_KEY || '').trim();
   // 도보: TMap 키가 있으면 TMap 보행자 API(한국 도보 데이터) 우선
   // (설정에 직접 입력한 키 → 없으면 앱에 내장된 기본 키)
-  if (mode === 'walk') {
-    const tkey = (localStorage.getItem('tmap_key') || TMAP_DEFAULT_KEY || '').trim();
-    if (tkey) {
-      try { return await fetchTmapWalk(from, to, tkey); }
-      catch (e) {
-        if (e && e.name === 'TypeError') toast('TMap 직접 호출이 차단됐어요. 공개 서버로 계산합니다.');
-        /* 폴백: 아래 공개 서버 */
-      }
+  if (mode === 'walk' && tkey) {
+    try { return await fetchTmapWalk(from, to, tkey); }
+    catch (e) {
+      if (e && e.name === 'TypeError') toast('TMap 직접 호출이 차단됐어요. 공개 서버로 계산합니다.');
+      /* 폴백: 아래 공개 서버 */
     }
+  }
+  // 자동차: TMap 자동차 API(실시간 교통 반영) 우선, 실패 시 OSRM
+  // 목적지가 도로에서 멀면(지하철역 등) 가장 가까운 도로까지 차 + 나머지는 도보 하이브리드
+  if (mode === 'car' && tkey) {
+    try { return await fetchCarHybrid(from, to, tkey); }
+    catch (e) { /* 폴백: 아래 OSRM */ }
   }
   const host = ROUTE_HOST[mode] || ROUTE_HOST.walk;
   const url = host + '/route/v1/driving/' +
@@ -627,6 +738,75 @@ async function fetchTmapWalk(from, to, key) {
       maneuver: { type: last ? 'arrive' : 'turn', modifier: last ? '' : tmapModifier(pt.p.turnType) },
       distance: nxt ? haversineM(pt, nxt) : 0,
       name: pt.p.intersectionName || pt.p.nearPoiName || '',
+      tmapDesc: pt.p.description || (last ? '목적지에 도착합니다' : '')
+    };
+  });
+  let cum = 0;
+  const targets = steps.map(s => { const t = { cumDist: cum, step: s }; cum += (s.distance || 0); return t; });
+  return { points, distance, duration, steps, targets, total: cum };
+}
+
+/* 자동차 하이브리드: 차량 경로 종점(가장 가까운 도로)에서 목적지까지 도보 연결 */
+async function fetchCarHybrid(from, to, key) {
+  const car = await fetchTmapCar(from, to, key); // 실패 시 throw → 호출자가 OSRM 폴백
+  const end = car.points[car.points.length - 1];
+  const endPt = { lat: end[0], lng: end[1] };
+  const gap = haversineM(endPt, to);
+  if (gap <= 60) return car; // 도로 바로 앞이면 그대로
+  let w;
+  try { w = await fetchTmapWalk({ lat: endPt.lat, lng: endPt.lng, name: '하차 지점' }, to, key); }
+  catch (e) { return car; }
+  const offset = car.total;
+  const wTargets = w.targets.map(t => ({ cumDist: t.cumDist + offset, step: t.step }));
+  return {
+    points: car.points.concat(w.points),
+    carPoints: car.points,
+    walkPoints: w.points,
+    carDistance: car.distance, carDuration: car.duration,
+    walkDistance: w.distance, walkDuration: w.duration,
+    distance: car.distance + w.distance,
+    duration: car.duration + w.duration,
+    steps: car.steps.concat(w.steps),
+    targets: car.targets.concat(wTargets),
+    total: offset + w.total
+  };
+}
+
+/* TMap 자동차 경로안내 (실시간 교통 반영) */
+async function fetchTmapCar(from, to, key) {
+  const r = await fetch('https://apis.openapi.sk.com/tmap/routes?version=1&format=json', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'appKey': key },
+    body: JSON.stringify({
+      startX: String(from.lng), startY: String(from.lat),
+      endX: String(to.lng), endY: String(to.lat),
+      reqCoordType: 'WGS84GEO', resCoordType: 'WGS84GEO',
+      searchOption: '0', trafficInfo: 'Y'
+    })
+  });
+  if (!r.ok) throw new Error('tmap-car-' + r.status);
+  const j = await r.json();
+  const feats = j.features || [];
+  let distance = 0, duration = 0;
+  const points = [], guidePts = [];
+  for (const f of feats) {
+    const p = f.properties || {}, g = f.geometry || {};
+    if (p.totalDistance) distance = Math.max(distance, +p.totalDistance);
+    if (p.totalTime) duration = Math.max(duration, +p.totalTime);
+    if (g.type === 'LineString' && g.coordinates) {
+      for (const c of g.coordinates) points.push([c[1], c[0]]);
+    } else if (g.type === 'Point' && g.coordinates && +p.turnType !== 200) {
+      guidePts.push({ lat: g.coordinates[1], lng: g.coordinates[0], p });
+    }
+  }
+  if (!points.length || !distance) throw new Error('tmap-car-empty');
+  const steps = guidePts.map((pt, i) => {
+    const last = i === guidePts.length - 1;
+    const nxt = guidePts[i + 1];
+    return {
+      maneuver: { type: last ? 'arrive' : 'turn', modifier: last ? '' : tmapModifier(pt.p.turnType) },
+      distance: nxt ? haversineM(pt, nxt) : 0,
+      name: pt.p.intersectionName || pt.p.nearPoiName || pt.p.name || '',
       tmapDesc: pt.p.description || (last ? '목적지에 도착합니다' : '')
     };
   });
@@ -714,18 +894,26 @@ async function showRoute(from, to, mode, opts) {
   opts = opts || {};
   if (!opts.quiet) sheetLoading('경로 계산 중…');
   const route = await fetchRoute(from, to, mode);
-  state.lastRoute = { from, to, mode, points: route.points, distance: route.distance, duration: route.duration, steps: route.steps, targets: route.targets, total: route.total };
+  const hybrid = !!(route.walkPoints && route.walkPoints.length > 1);
+  const modeLabel = hybrid ? '자동차 + 도보' : MODE_LABEL[mode];
+  state.lastRoute = { from, to, mode, points: route.points, distance: route.distance, duration: route.duration, steps: route.steps, targets: route.targets, total: route.total, walkPoints: route.walkPoints || null };
   state.adapter.clearMarkers();
   state.adapter.clearRoute();
   state.adapter.addMarker(from.lat, from.lng, { label: '출발: ' + from.name });
   state.adapter.addMarker(to.lat, to.lng, { label: '도착: ' + to.name });
-  state.adapter.drawRoute(route.points);
+  state.adapter.drawRoute(route.carPoints || route.points, route.walkPoints);
+  $('clearBtn').classList.add('on');
   if (!opts.quiet) {
+    saveHistory({ q: state.lastQuery || (from.name + '에서 ' + to.name + '까지 ' + MODE_LABEL[mode]), from: from.name, to: to.name, mode });
+    const legInfo = hybrid
+      ? '<div class="hint">🚗 자동차 ' + fmtDist(route.carDistance) + ' (' + fmtTime(route.carDuration) + ') → 🚶 도보 ' + fmtDist(route.walkDistance) + ' (' + fmtTime(route.walkDuration) + ')</div>'
+      : '';
     openSheet(
       '<h3>' + from.name + ' → ' + to.name + '</h3>' +
       '<div class="meta"><span>거리 <b>' + fmtDist(route.distance) + '</b></span>' +
       '<span>예상 <b>' + fmtTime(route.duration) + '</b></span>' +
-      '<span>' + MODE_LABEL[mode] + '</span></div>' +
+      '<span>' + modeLabel + '</span></div>' +
+      legInfo +
       modeChips(mode) +
       '<div class="btnrow">' +
       '<button class="btn" id="navStart">길안내 시작</button>' +
@@ -736,7 +924,7 @@ async function showRoute(from, to, mode, opts) {
       c.onclick = () => { const m = c.dataset.mode; closeSheet(); rerouteWithMode(m); };
     });
     $('navStart').onclick = startNavigation;
-    speak(from.name + '에서 ' + to.name + '까지 ' + MODE_LABEL[mode] + ' 경로입니다. 거리 ' + fmtDist(route.distance) + ', 예상 시간 ' + fmtTime(route.duration));
+    speak(from.name + '에서 ' + to.name + '까지 ' + modeLabel + ' 경로입니다. 거리 ' + fmtDist(route.distance) + ', 예상 시간 ' + fmtTime(route.duration));
   }
   return route;
 }
@@ -821,6 +1009,7 @@ function startNavigation() {
   nav.targets = lr.targets; nav.stepIdx = 0; nav.announced = {}; nav.offCount = 0;
   nav.dest = lr.to; nav.active = true;
   $('guidance').classList.add('on');
+  $('clearBtn').classList.remove('on');
   $('gDest').textContent = '목적지: ' + lr.to.name + ' · ' + MODE_LABEL[lr.mode];
   $('gTurn').textContent = '길안내를 시작합니다';
   $('gDist').textContent = 'GPS 수신 중…';
@@ -840,6 +1029,7 @@ function stopNavigation(silent) {
   if (nav.watchId != null) { try { navigator.geolocation.clearWatch(nav.watchId); } catch (e) {} nav.watchId = null; }
   if (nav.wakeLock) { try { nav.wakeLock.release(); } catch (e) {} nav.wakeLock = null; }
   $('guidance').classList.remove('on');
+  if (state.lastRoute) $('clearBtn').classList.add('on');
   if (!silent) speak('길안내를 종료합니다.');
 }
 function onNavErr() { /* 일시적 GPS 오류는 무시 */ }
@@ -908,9 +1098,9 @@ async function rerouteFromHere(lat, lng) {
     const lr = state.lastRoute;
     const from = { lat, lng, name: '현재 위치' };
     const route = await fetchRoute(from, lr.to, lr.mode);
-    state.lastRoute = { from, to: lr.to, mode: lr.mode, points: route.points, distance: route.distance, duration: route.duration, steps: route.steps, targets: route.targets, total: route.total };
+    state.lastRoute = { from, to: lr.to, mode: lr.mode, points: route.points, distance: route.distance, duration: route.duration, steps: route.steps, targets: route.targets, total: route.total, walkPoints: route.walkPoints || null };
     state.adapter.clearRoute();
-    state.adapter.drawRoute(route.points);
+    state.adapter.drawRoute(route.carPoints || route.points, route.walkPoints);
     // nav 상태 리셋
     nav.points = route.points.map(p => ({ lat: p[0], lng: p[1] }));
     nav.cum = [0];
@@ -929,9 +1119,28 @@ function updateCompass() {
   if (headingDeg == null) return;
   const deg = Math.round(headingDeg);
   $('cdeg').textContent = deg + '°';
-  const show = compassMode === 'heading' ? 0 : -headingDeg;
-  $('cdial').style.transform = 'rotate(' + show + 'deg)';
+  // 다이얼은 항상 실제 방위를 가리키고, 지도 회전 여부가 모드를 구분한다
+  $('cdial').style.transform = 'rotate(' + (-headingDeg) + 'deg)';
   $('cmode').textContent = compassMode === 'heading' ? '진행 방향' : '북쪽 고정';
+  applyMapRotation();
+}
+/* 진행 방향 모드: 지도를 회전시켜 보고 있는 방향이 위로 오게 한다 */
+function applyMapRotation() {
+  const el = $('map');
+  const rot = compassMode === 'heading' && headingDeg != null;
+  if (rot) {
+    if (!el.classList.contains('rot')) {
+      el.classList.add('rot');
+      if (state.adapter && state.adapter.relayout) state.adapter.relayout();
+    }
+    el.style.transform = 'rotate(' + (-headingDeg) + 'deg)';
+  } else {
+    if (el.classList.contains('rot')) {
+      el.classList.remove('rot');
+      if (state.adapter && state.adapter.relayout) state.adapter.relayout();
+    }
+    el.style.transform = '';
+  }
 }
 async function onCompassTap() {
   try {
@@ -980,6 +1189,7 @@ function toggleMic() {
   recog.onresult = e => {
     const text = e.results[0][0].transcript;
     $('cmdInput').value = text;
+    state.lastQuery = text;
     handleCommand(text);
   };
   try { recog.start(); } catch (e) {}
@@ -1037,8 +1247,11 @@ async function initMap() {
 async function init() {
   loadSavedPlaces();
   $('micBtn').onclick = toggleMic;
-  $('searchBtn').onclick = () => { const t = $('cmdInput').value.trim(); if (t) handleCommand(t); };
-  $('cmdInput').addEventListener('keydown', e => { if (e.key === 'Enter') { const t = e.target.value.trim(); if (t) handleCommand(t); } });
+  $('searchBtn').onclick = () => { const t = $('cmdInput').value.trim(); if (t) { state.lastQuery = t; handleCommand(t); } };
+  $('cmdInput').addEventListener('keydown', e => { if (e.key === 'Enter') { const t = e.target.value.trim(); if (t) { state.lastQuery = t; handleCommand(t); } } });
+  $('cmdInput').addEventListener('focus', () => { if (!$('cmdInput').value.trim()) renderHistory(); });
+  $('cmdInput').addEventListener('blur', () => { setTimeout(() => $('history').classList.remove('on'), 150); });
+  $('clearBtn').onclick = clearAll;
   $('compass').onclick = onCompassTap;
   $('locBtn').onclick = async () => {
     const p = await getGPS(8000);
