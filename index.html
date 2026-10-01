@@ -18,8 +18,7 @@
 html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
   font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR",sans-serif;
   overscroll-behavior:none}
-#map{position:fixed;inset:0;z-index:0;background:#0d0d0d;transition:transform .25s linear}
-#map.rot{inset:-25%} /* 진행방향 모드: 회전 시 모서리가 비지 않도록 150%로 확대 */
+#map{position:fixed;inset:0;z-index:0;background:#0d0d0d;transition:transform .25s linear;touch-action:none}
 .leaflet-container{background:#0d0d0d;font-family:inherit}
 
 /* 상단 검색바 */
@@ -31,6 +30,10 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 .searchbox input{flex:1;min-width:0;background:none;border:none;outline:none;color:var(--text);
   font-size:16px;padding:8px 0}
 .searchbox input::placeholder{color:var(--muted)}
+.clrinput{display:none;flex:none;width:32px;height:32px;border:none;border-radius:50%;
+  background:transparent;color:var(--muted);font-size:14px;cursor:pointer;
+  align-items:center;justify-content:center}
+.clrinput.on{display:flex}
 .iconbtn{width:40px;height:40px;flex:none;border-radius:50%;border:none;background:var(--panel2);
   color:var(--text);font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center}
 .micbtn{width:52px;height:52px;flex:none;border-radius:50%;border:none;cursor:pointer;
@@ -42,8 +45,8 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 .micbtn svg{display:block}
 .setbtn{position:fixed;z-index:20;left:12px;bottom:calc(18px + env(safe-area-inset-bottom))}
 
-/* 나침반 */
-.compass{position:fixed;z-index:20;right:12px;top:calc(78px + env(safe-area-inset-top));
+/* 나침반 (우하단: 안내 패널에 가려지지 않도록) */
+.compass{position:fixed;z-index:20;right:12px;bottom:calc(96px + env(safe-area-inset-bottom));
   width:68px;height:68px;border-radius:50%;background:rgba(28,28,30,.92);
   border:1px solid var(--line);box-shadow:0 2px 12px rgba(0,0,0,.5);
   cursor:pointer;overflow:hidden;user-select:none}
@@ -155,6 +158,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 <div class="topbar">
   <div class="searchbox">
     <input id="cmdInput" type="text" placeholder="&quot;강남역까지 걸어서&quot; 말하거나 입력" autocomplete="off">
+    <button class="clrinput" id="inputClear" title="지우기" aria-label="입력 지우기">✕</button>
     <button class="iconbtn" id="searchBtn" title="검색">🔍</button>
   </div>
   <button class="micbtn" id="micBtn" title="음성 명령" aria-label="음성 명령"><svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor" aria-hidden="true"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.91-3c-.49 0-.9.36-.98.85C16.52 14.2 14.47 16 12 16s-4.52-1.8-4.93-4.15c-.08-.49-.49-.85-.98-.85-.61 0-1.09.54-1 1.14.49 3 2.89 5.35 5.91 5.78V20c0 .55.45 1 1 1s1-.45 1-1v-2.08c3.02-.43 5.42-2.78 5.91-5.78.1-.6-.39-1.14-1-1.14z"/></svg></button>
@@ -295,7 +299,7 @@ function projectPointOnSegment(p, a, b) {
 }
 
 /* ================= 지도 어댑터 (provider 추상화) =================
-   공통 인터페이스: setCenter, addMarker, clearMarkers, drawRoute, clearRoute,
+   공통 인터페이스: setCenter, panTo, addMarker, clearMarkers, drawRoute, clearRoute,
    setUserLocation, fitPoints, searchKeyword, searchAddress, relayout                     */
 class KakaoAdapter {
   async init() {
@@ -320,6 +324,7 @@ class KakaoAdapter {
     return true;
   }
   setCenter(lat, lng) { this.map.setCenter(new kakao.maps.LatLng(lat, lng)); }
+  panTo(lat, lng) { try { this.map.panTo(new kakao.maps.LatLng(lat, lng)); } catch (e) { this.setCenter(lat, lng); } }
   addMarker(lat, lng, opts) {
     opts = opts || {};
     const m = new kakao.maps.Marker({ position: new kakao.maps.LatLng(lat, lng), map: this.map });
@@ -423,6 +428,7 @@ class LeafletAdapter {
     return true;
   }
   setCenter(lat, lng) { this.map.setView([lat, lng], 15); }
+  panTo(lat, lng) { try { this.map.panTo([lat, lng], { animate: true }); } catch (e) { this.map.panTo([lat, lng]); } }
   addMarker(lat, lng, opts) {
     opts = opts || {};
     const m = L.marker([lat, lng]).addTo(this.layer);
@@ -746,15 +752,27 @@ async function fetchTmapWalk(from, to, key) {
   return { points, distance, duration, steps, targets, total: cum };
 }
 
+/* 역별 자동차 하차 지점: 차가 직접 못 가는 역은 주정차 가능한 가까운 도로(육교 입구 등)에서 내리도록 지정.
+   { station: 역 기본명(포함 매치), exitMatch: 출구명(포함 매치, 생략 가능), lat/lng: 하차 지점, label: 표시명 } */
+const STATION_DROPOFFS = [
+  { station: '구일역', exitMatch: '1번출구', lat: 37.4952722, lng: 126.8721050, label: '육교 앞(구일역1번약국)' }
+];
+function findDropoff(to) {
+  if (!to || !to.name) return null;
+  return STATION_DROPOFFS.find(d => to.name.includes(d.station) && (!d.exitMatch || to.name.includes(d.exitMatch))) || null;
+}
+
 /* 자동차 하이브리드: 차량 경로 종점(가장 가까운 도로)에서 목적지까지 도보 연결 */
 async function fetchCarHybrid(from, to, key) {
-  const car = await fetchTmapCar(from, to, key); // 실패 시 throw → 호출자가 OSRM 폴백
+  const drop = findDropoff(to);
+  const carDest = drop ? { lat: drop.lat, lng: drop.lng, name: drop.label } : to;
+  const car = await fetchTmapCar(from, carDest, key); // 실패 시 throw → 호출자가 OSRM 폴백
   const end = car.points[car.points.length - 1];
   const endPt = { lat: end[0], lng: end[1] };
   const gap = haversineM(endPt, to);
-  if (gap <= 60) return car; // 도로 바로 앞이면 그대로
+  if (!drop && gap <= 60) return car; // 도로 바로 앞이면 그대로
   let w;
-  try { w = await fetchTmapWalk({ lat: endPt.lat, lng: endPt.lng, name: '하차 지점' }, to, key); }
+  try { w = await fetchTmapWalk({ lat: endPt.lat, lng: endPt.lng, name: drop ? drop.label : '하차 지점' }, to, key); }
   catch (e) { return car; }
   const offset = car.total;
   const wTargets = w.targets.map(t => ({ cumDist: t.cumDist + offset, step: t.step }));
@@ -764,6 +782,7 @@ async function fetchCarHybrid(from, to, key) {
     walkPoints: w.points,
     carDistance: car.distance, carDuration: car.duration,
     walkDistance: w.distance, walkDuration: w.duration,
+    dropLabel: drop ? drop.label : null,
     distance: car.distance + w.distance,
     duration: car.duration + w.duration,
     steps: car.steps.concat(w.steps),
@@ -906,7 +925,7 @@ async function showRoute(from, to, mode, opts) {
   if (!opts.quiet) {
     saveHistory({ q: state.lastQuery || (from.name + '에서 ' + to.name + '까지 ' + MODE_LABEL[mode]), from: from.name, to: to.name, mode });
     const legInfo = hybrid
-      ? '<div class="hint">🚗 자동차 ' + fmtDist(route.carDistance) + ' (' + fmtTime(route.carDuration) + ') → 🚶 도보 ' + fmtDist(route.walkDistance) + ' (' + fmtTime(route.walkDuration) + ')</div>'
+      ? '<div class="hint">🚗 자동차 ' + fmtDist(route.carDistance) + ' (' + fmtTime(route.carDuration) + ')' + (route.dropLabel ? ' · ' + route.dropLabel + ' 하차' : '') + ' → 🚶 도보 ' + fmtDist(route.walkDistance) + ' (' + fmtTime(route.walkDuration) + ')</div>'
       : '';
     openSheet(
       '<h3>' + from.name + ' → ' + to.name + '</h3>' +
@@ -924,7 +943,9 @@ async function showRoute(from, to, mode, opts) {
       c.onclick = () => { const m = c.dataset.mode; closeSheet(); rerouteWithMode(m); };
     });
     $('navStart').onclick = startNavigation;
-    speak(from.name + '에서 ' + to.name + '까지 ' + modeLabel + ' 경로입니다. 거리 ' + fmtDist(route.distance) + ', 예상 시간 ' + fmtTime(route.duration));
+    speak(from.name + '에서 ' + to.name + '까지 ' + modeLabel + ' 경로입니다. ' +
+      (route.dropLabel ? route.dropLabel + '에서 하차 후 도보로 이동합니다. ' : '') +
+      '거리 ' + fmtDist(route.distance) + ', 예상 시간 ' + fmtTime(route.duration));
   }
   return route;
 }
@@ -1124,21 +1145,13 @@ function updateCompass() {
   $('cmode').textContent = compassMode === 'heading' ? '진행 방향' : '북쪽 고정';
   applyMapRotation();
 }
-/* 진행 방향 모드: 지도를 회전시켜 보고 있는 방향이 위로 오게 한다 */
+/* 진행 방향 모드: 지도를 회전시켜 보고 있는 방향이 위로 오게 한다.
+   카카오맵에 회전 API가 없어 CSS transform으로 돌림. scale(1.45)로 모서리 잘림 방지 */
 function applyMapRotation() {
   const el = $('map');
-  const rot = compassMode === 'heading' && headingDeg != null;
-  if (rot) {
-    if (!el.classList.contains('rot')) {
-      el.classList.add('rot');
-      if (state.adapter && state.adapter.relayout) state.adapter.relayout();
-    }
-    el.style.transform = 'rotate(' + (-headingDeg) + 'deg)';
+  if (compassMode === 'heading' && headingDeg != null) {
+    el.style.transform = 'rotate(' + (-headingDeg) + 'deg) scale(1.45)';
   } else {
-    if (el.classList.contains('rot')) {
-      el.classList.remove('rot');
-      if (state.adapter && state.adapter.relayout) state.adapter.relayout();
-    }
     el.style.transform = '';
   }
 }
@@ -1251,11 +1264,23 @@ async function init() {
   $('cmdInput').addEventListener('keydown', e => { if (e.key === 'Enter') { const t = e.target.value.trim(); if (t) { state.lastQuery = t; handleCommand(t); } } });
   $('cmdInput').addEventListener('focus', () => { if (!$('cmdInput').value.trim()) renderHistory(); });
   $('cmdInput').addEventListener('blur', () => { setTimeout(() => $('history').classList.remove('on'), 150); });
+  const syncInputClear = () => $('inputClear').classList.toggle('on', !!$('cmdInput').value);
+  $('cmdInput').addEventListener('input', () => { syncInputClear(); $('history').classList.remove('on'); });
+  $('inputClear').onclick = () => {
+    $('cmdInput').value = ''; syncInputClear();
+    $('history').classList.remove('on'); $('cmdInput').focus();
+  };
+  syncInputClear();
   $('clearBtn').onclick = clearAll;
   $('compass').onclick = onCompassTap;
   $('locBtn').onclick = async () => {
+    toast('현위치 찾는 중…');
     const p = await getGPS(8000);
-    if (p) { state.adapter.setCenter(p.lat, p.lng); state.adapter.setUserLocation(p.lat, p.lng); }
+    if (p) {
+      state.adapter.panTo(p.lat, p.lng);
+      state.adapter.setUserLocation(p.lat, p.lng);
+      toast('현위치로 이동했어요');
+    }
     else toast('위치를 가져오지 못했어요. 권한을 확인해 주세요.');
   };
   $('setBtn').onclick = openSettings;
