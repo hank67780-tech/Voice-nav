@@ -191,6 +191,14 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
       </div>
       <div class="hint">주소를 입력하면 좌표로 변환해 저장합니다. 명령에서 "우리집에서 회사까지 버스로" 처럼 쓸 수 있어요.</div>
     </div>
+    <div class="msec">
+      <h4>도보 경로 (TMap)</h4>
+      <div class="inrow">
+        <input id="tmapKey" placeholder="TMap appKey" autocomplete="off">
+        <button id="tmapSave">저장</button>
+      </div>
+      <div class="hint">openapi.sk.com에서 "보행자 경로안내" 상품을 구독한 앱의 appKey를 입력하면 도보 경로를 TMap(한국 도보 데이터)으로 계산합니다. 키가 없거나 연결에 실패하면 공개 서버(OSM)로 계산합니다.</div>
+    </div>
     <button class="mclose" id="setClose">닫기</button>
   </div>
 </div>
@@ -494,6 +502,17 @@ const ROUTE_HOST = {
   bike: 'https://routing.openstreetmap.de/routed-bike'
 };
 async function fetchRoute(from, to, mode) {
+  // 도보: TMap 키가 있으면 TMap 보행자 API(한국 도보 데이터) 우선
+  if (mode === 'walk') {
+    const tkey = (localStorage.getItem('tmap_key') || '').trim();
+    if (tkey) {
+      try { return await fetchTmapWalk(from, to, tkey); }
+      catch (e) {
+        if (e && e.name === 'TypeError') toast('TMap 직접 호출이 차단됐어요. 공개 서버로 계산합니다.');
+        /* 폴백: 아래 공개 서버 */
+      }
+    }
+  }
   const host = ROUTE_HOST[mode] || ROUTE_HOST.walk;
   const url = host + '/route/v1/driving/' +
     from.lng + ',' + from.lat + ';' + to.lng + ',' + to.lat +
@@ -508,6 +527,56 @@ async function fetchRoute(from, to, mode) {
   let cum = 0;
   const targets = steps.map(s => { const t = { cumDist: cum, step: s }; cum += (s.distance || 0); return t; });
   return { points, distance: rt.distance, duration: rt.duration, steps, targets, total: cum };
+}
+
+/* ================= TMap 보행자 경로 ================= */
+function tmapModifier(turnType) {
+  const t = +turnType;
+  if (t === 12 || t === 16 || t === 17) return 'left';
+  if (t === 13 || t === 18 || t === 19) return 'right';
+  if (t === 14) return 'uturn';
+  return '';
+}
+async function fetchTmapWalk(from, to, key) {
+  const r = await fetch('https://apis.openapi.sk.com/tmap/routes/pedestrian?version=1&format=json', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'appKey': key },
+    body: JSON.stringify({
+      startX: String(from.lng), startY: String(from.lat),
+      endX: String(to.lng), endY: String(to.lat),
+      startName: from.name || '출발지', endName: to.name || '목적지',
+      reqCoordType: 'WGS84GEO', resCoordType: 'WGS84GEO', searchOption: '0'
+    })
+  });
+  if (!r.ok) throw new Error('tmap-' + r.status);
+  const j = await r.json();
+  const feats = j.features || [];
+  let distance = 0, duration = 0;
+  const points = [], pts = [];
+  for (const f of feats) {
+    const p = f.properties || {}, g = f.geometry || {};
+    if (p.totalDistance) distance = Math.max(distance, +p.totalDistance);
+    if (p.totalTime) duration = Math.max(duration, +p.totalTime);
+    if (g.type === 'LineString' && g.coordinates) {
+      for (const c of g.coordinates) points.push([c[1], c[0]]);
+    } else if (g.type === 'Point' && g.coordinates) {
+      pts.push({ lat: g.coordinates[1], lng: g.coordinates[0], p });
+    }
+  }
+  if (!points.length || !distance) throw new Error('tmap-empty');
+  const steps = pts.map((pt, i) => {
+    const last = i === pts.length - 1;
+    const nxt = pts[i + 1];
+    return {
+      maneuver: { type: last ? 'arrive' : 'turn', modifier: last ? '' : tmapModifier(pt.p.turnType) },
+      distance: nxt ? haversineM(pt, nxt) : 0,
+      name: pt.p.intersectionName || pt.p.nearPoiName || '',
+      tmapDesc: pt.p.description || (last ? '목적지에 도착합니다' : '')
+    };
+  });
+  let cum = 0;
+  const targets = steps.map(s => { const t = { cumDist: cum, step: s }; cum += (s.distance || 0); return t; });
+  return { points, distance, duration, steps, targets, total: cum };
 }
 
 /* ================= 하단 시트 ================= */
@@ -664,6 +733,7 @@ const nav = {
   stepIdx: 0, announced: {}, offCount: 0, watchId: null, dest: null, wakeLock: null,
 };
 function actionPhrase(step) {
+  if (step && step.tmapDesc) return step.tmapDesc; // TMap 한국어 안내문구 우선
   const mn = (step && step.maneuver) || {};
   const mod = mn.modifier || '';
   if (mn.type === 'arrive') return '목적지에 도착합니다';
@@ -912,6 +982,20 @@ async function init() {
   $('setClose').onclick = closeSettings;
   $('settingsModal').addEventListener('click', e => { if (e.target.id === 'settingsModal') closeSettings(); });
   $('placeAdd').onclick = addPlace;
+  $('tmapKey').value = localStorage.getItem('tmap_key') || '';
+  $('tmapSave').onclick = async () => {
+    const v = $('tmapKey').value.trim();
+    if (!v) { localStorage.removeItem('tmap_key'); toast('TMap 키 삭제됨.'); return; }
+    localStorage.setItem('tmap_key', v);
+    toast('연결 테스트 중…');
+    try {
+      // 서울시청→광화문 짧은 구간으로 키 유효성 테스트
+      await fetchTmapWalk({ lat: 37.5663, lng: 126.9779, name: '테스트' }, { lat: 37.5759, lng: 126.9769, name: '테스트' }, v);
+      toast('TMap 연결 성공! 도보 경로는 TMap으로 계산됩니다.');
+    } catch (e) {
+      toast('TMap 연결 실패(' + (e.message || '오류') + '). 키와 상품 구독을 확인해 주세요.');
+    }
+  };
   $('gStop').onclick = () => stopNavigation();
   $('provKakao').onclick = () => toast('카카오 지도를 사용 중입니다.');
   $('provNaver').onclick = () => toast('네이버 지도는 준비 중입니다.');
