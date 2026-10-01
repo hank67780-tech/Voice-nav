@@ -18,7 +18,8 @@
 html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
   font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR",sans-serif;
   overscroll-behavior:none}
-#map{position:fixed;inset:0;z-index:0;background:#0d0d0d;transition:transform .25s linear;touch-action:none}
+#map{position:fixed;inset:0;z-index:0;background:#0d0d0d;touch-action:none}
+/* 지도는 항상 북쪽 고정. 방향 표시는 내 위치 마커의 콘(cone)이 담당 */
 .leaflet-container{background:#0d0d0d;font-family:inherit}
 
 /* 상단 검색바 */
@@ -45,11 +46,12 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 .micbtn svg{display:block}
 .setbtn{position:fixed;z-index:20;left:12px;bottom:calc(18px + env(safe-area-inset-bottom))}
 
-/* 나침반 (우하단: 안내 패널에 가려지지 않도록) */
+/* 나침반 (우하단: 안내 패널에 가려지지 않도록. 팔로우 모드에서만 표시) */
 .compass{position:fixed;z-index:20;right:12px;bottom:calc(96px + env(safe-area-inset-bottom));
   width:68px;height:68px;border-radius:50%;background:rgba(28,28,30,.92);
   border:1px solid var(--line);box-shadow:0 2px 12px rgba(0,0,0,.5);
-  cursor:pointer;overflow:hidden;user-select:none}
+  cursor:pointer;overflow:hidden;user-select:none;display:none}
+.compass.on{display:block}
 .cdial{position:absolute;inset:0;transition:transform .18s linear}
 .cdial span{position:absolute;left:50%;top:50%;font-size:11px;font-weight:700;color:var(--muted);
   transform:rotate(var(--a)) translateY(-24px);transform-origin:0 0}
@@ -57,10 +59,20 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 .cneedle{position:absolute;left:50%;top:50%;transform:translate(-50%,-58%);color:var(--accent);
   font-size:16px;text-shadow:0 0 6px rgba(0,0,0,.8)}
 .cdeg{position:absolute;left:0;right:0;bottom:7px;text-align:center;font-size:10px;color:var(--muted)}
-.cmode{position:absolute;left:0;right:0;top:6px;text-align:center;font-size:9px;color:var(--accent)}
 
-/* 현재위치 버튼 */
-.locbtn{position:fixed;z-index:20;right:12px;bottom:calc(18px + env(safe-area-inset-bottom))}
+/* 현위치 버튼 (네이버식 타깃 아이콘. 탭: 현위치로 이동 + 따라가기 토글) */
+.locbtn{position:fixed;z-index:20;right:12px;bottom:calc(18px + env(safe-area-inset-bottom));
+  width:44px;height:44px;border-radius:50%;border:1px solid var(--line);
+  background:rgba(28,28,30,.94);color:#0a84ff;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  box-shadow:0 2px 12px rgba(0,0,0,.5)}
+.locbtn svg{display:block}
+.locbtn.active{background:#0a84ff;border-color:#0a84ff;color:#fff}
+
+/* 내 위치 방향 콘 (지도 대신 마커가 회전) */
+.ucone{width:72px;height:72px;pointer-events:none}
+.ucone svg{display:block}
+.uconewrap{background:none;border:none}
 
 /* 경로 지우기 버튼 */
 .clearbtn{position:fixed;z-index:20;right:12px;top:calc(158px + env(safe-area-inset-top));display:none}
@@ -173,10 +185,15 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
   </div>
   <div class="cneedle">▲</div>
   <div class="cdeg" id="cdeg">--°</div>
-  <div class="cmode" id="cmode">북쪽 고정</div>
 </div>
 
-<button class="iconbtn locbtn" id="locBtn" title="현재 위치">📍</button>
+<button class="locbtn" id="locBtn" title="현위치 (탭: 따라가기 토글)" aria-label="현위치">
+  <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+    <circle cx="12" cy="12" r="6.5"/>
+    <circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/>
+    <path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3"/>
+  </svg>
+</button>
 <button class="iconbtn setbtn" id="setBtn" title="설정">⚙️</button>
 <button class="iconbtn clearbtn" id="clearBtn" title="경로 지우기">✕</button>
 <div id="history"></div>
@@ -243,6 +260,8 @@ const $ = id => document.getElementById(id);
 const state = {
   adapter: null, kakaoReady: false,
   myLoc: null,            // {lat,lng}
+  follow: false,          // 현위치 따라가기 모드
+  lastPanAt: null,
   markers: [],            // adapter-agnostic handles kept by adapter
   lastRoute: null,        // {from,to,mode,points,distance,duration,steps}
   savedPlaces: {},        // name -> {lat,lng,name}
@@ -300,7 +319,8 @@ function projectPointOnSegment(p, a, b) {
 
 /* ================= 지도 어댑터 (provider 추상화) =================
    공통 인터페이스: setCenter, panTo, addMarker, clearMarkers, drawRoute, clearRoute,
-   setUserLocation, fitPoints, searchKeyword, searchAddress, relayout                     */
+   setUserLocation, showCone, hideCone, onUserDrag,
+   fitPoints, searchKeyword, searchAddress, relayout                     */
 class KakaoAdapter {
   async init() {
     await withTimeout(new Promise((resolve, reject) => {
@@ -315,6 +335,8 @@ class KakaoAdapter {
             this.geocoder = new kakao.maps.services.Geocoder();
             this.markers = []; this.polyline = null; this.casing = null; this.userMarker = null;
             this.walkLine = null; this.walkCasing = null;
+            this.coneOv = null; this.coneEl = null; this._onUserDrag = null;
+            kakao.maps.event.addListener(this.map, 'dragstart', () => { if (this._onUserDrag) this._onUserDrag(); });
             this._routeSeq = 0;
             resolve();
           } catch (e) { reject(e); }
@@ -378,6 +400,23 @@ class KakaoAdapter {
       });
     } else this.userMarker.setPosition(pos);
   }
+  /* 내 위치 방향 콘: 지도는 북쪽 고정, 파란 점 앞에 부채꼴이 진행 방향을 가리킴 */
+  showCone(lat, lng, deg) {
+    const pos = new kakao.maps.LatLng(lat, lng);
+    if (!this.coneOv) {
+      const el = document.createElement('div');
+      el.className = 'ucone';
+      el.innerHTML = '<svg width="72" height="72" viewBox="0 0 72 72"><path d="M36 36 L19 7 A34 34 0 0 1 53 7 Z" fill="rgba(10,132,255,.30)"/></svg>';
+      el.style.display = 'none';
+      this.coneEl = el;
+      this.coneOv = new kakao.maps.CustomOverlay({ position: pos, content: el, xAnchor: 0.5, yAnchor: 0.5 });
+      this.coneOv.setMap(this.map);
+    } else this.coneOv.setPosition(pos);
+    this.coneEl.style.transform = 'rotate(' + deg + 'deg)';
+    this.coneEl.style.display = 'block';
+  }
+  hideCone() { if (this.coneEl) this.coneEl.style.display = 'none'; }
+  onUserDrag(cb) { this._onUserDrag = cb; }
   searchKeyword(q, near) {
     return new Promise(resolve => {
       const o = { size: 5 };
@@ -424,6 +463,8 @@ class LeafletAdapter {
     }).addTo(this.map);
     this.layer = L.layerGroup().addTo(this.map);
     this.routeLayer = null; this.userMarker = null;
+    this.coneMarker = null; this.coneEl = null; this._onUserDrag = null;
+    this.map.on('dragstart', () => { if (this._onUserDrag) this._onUserDrag(); });
     setTimeout(() => { try { this.map.invalidateSize(); } catch (e) {} }, 300);
     return true;
   }
@@ -458,6 +499,21 @@ class LeafletAdapter {
       this.userMarker = L.circleMarker([lat, lng], { radius: 9, color: '#fff', weight: 3, fillColor: '#0a84ff', fillOpacity: 1 }).addTo(this.map);
     } else this.userMarker.setLatLng([lat, lng]);
   }
+  showCone(lat, lng, deg) {
+    if (!this.coneMarker) {
+      this.coneMarker = L.marker([lat, lng], {
+        icon: L.divIcon({ className: 'uconewrap', html: '<div class="ucone" style="display:none"><svg width="72" height="72" viewBox="0 0 72 72"><path d="M36 36 L19 7 A34 34 0 0 1 53 7 Z" fill="rgba(10,132,255,.30)"/></svg></div>', iconSize: [72, 72], iconAnchor: [36, 36] }),
+        interactive: false, keyboard: false
+      }).addTo(this.map);
+      this.coneEl = this.coneMarker.getElement().querySelector('.ucone');
+    } else this.coneMarker.setLatLng([lat, lng]);
+    if (this.coneEl) {
+      this.coneEl.style.transform = 'rotate(' + deg + 'deg)';
+      this.coneEl.style.display = 'block';
+    }
+  }
+  hideCone() { if (this.coneEl) this.coneEl.style.display = 'none'; }
+  onUserDrag(cb) { this._onUserDrag = cb; }
   // Leaflet 폴백에서는 카카오 검색 불가 → null 반환, 상위에서 Nominatim 사용
   searchKeyword() { return Promise.resolve(null); }
   searchAddress() { return Promise.resolve(null); }
@@ -1035,6 +1091,8 @@ function startNavigation() {
   $('gTurn').textContent = '길안내를 시작합니다';
   $('gDist').textContent = 'GPS 수신 중…';
   speak('길안내를 시작합니다.');
+  // 길안내 중에는 내 위치를 따라감 (나침반 표시, 지도는 북쪽 고정)
+  state.follow = true; state.lastPanAt = null; syncFollowUI();
   // 화면 꺼짐 방지
   try {
     if (navigator.wakeLock) navigator.wakeLock.request('screen').then(l => { nav.wakeLock = l; }).catch(() => {});
@@ -1047,6 +1105,7 @@ function startNavigation() {
 }
 function stopNavigation(silent) {
   nav.active = false;
+  exitFollow();
   if (nav.watchId != null) { try { navigator.geolocation.clearWatch(nav.watchId); } catch (e) {} nav.watchId = null; }
   if (nav.wakeLock) { try { nav.wakeLock.release(); } catch (e) {} nav.wakeLock = null; }
   $('guidance').classList.remove('on');
@@ -1061,6 +1120,8 @@ function onNavPos(pos) {
   state.myLoc = { lat, lng };
   state.adapter.setUserLocation(lat, lng);
   updateHeadingFromGPS(lat, lng);
+  followPan(lat, lng);
+  refreshCone();
 
   // 경로상에 투영
   let best = null;
@@ -1133,43 +1194,85 @@ async function rerouteFromHere(lat, lng) {
   rerouting = false;
 }
 
-/* ================= 나침반 ================= */
-let headingDeg = null, compassMode = 'north'; // 'north' | 'heading'
+/* ================= 현위치 따라가기 + 방향 표시 =================
+   지도는 항상 북쪽 고정. 내 위치 파란 점 앞의 부채꼴(cone)이 진행 방향을 가리킨다 (네이버식).
+   위치 버튼: 탭하면 현위치로 이동 + 따라가기 토글. 나침반은 따라가기 중에만 보이고,
+   탭하면 따라가기를 끄고 북쪽 고정 자유 지도로 돌아온다. */
+let headingDeg = null;
 let lastGpsForHeading = null;
-function updateCompass() {
-  if (headingDeg == null) return;
-  const deg = Math.round(headingDeg);
-  $('cdeg').textContent = deg + '°';
-  // 다이얼은 항상 실제 방위를 가리키고, 지도 회전 여부가 모드를 구분한다
-  $('cdial').style.transform = 'rotate(' + (-headingDeg) + 'deg)';
-  $('cmode').textContent = compassMode === 'heading' ? '진행 방향' : '북쪽 고정';
-  applyMapRotation();
+let followWatchId = null;
+function syncFollowUI() {
+  $('compass').classList.toggle('on', state.follow);
+  $('locBtn').classList.toggle('active', state.follow);
 }
-/* 진행 방향 모드: 지도를 회전시켜 보고 있는 방향이 위로 오게 한다.
-   카카오맵에 회전 API가 없어 CSS transform으로 돌림. scale(1.45)로 모서리 잘림 방지 */
-function applyMapRotation() {
-  const el = $('map');
-  if (compassMode === 'heading' && headingDeg != null) {
-    el.style.transform = 'rotate(' + (-headingDeg) + 'deg) scale(1.45)';
+function refreshCone() {
+  if (!state.adapter) return;
+  if (state.follow && headingDeg != null && state.myLoc) {
+    state.adapter.showCone(state.myLoc.lat, state.myLoc.lng, headingDeg);
   } else {
-    el.style.transform = '';
+    state.adapter.hideCone();
   }
 }
-async function onCompassTap() {
+function updateHeading() {
+  if (headingDeg == null) return;
+  $('cdeg').textContent = Math.round(headingDeg) + '°';
+  $('cdial').style.transform = 'rotate(' + (-headingDeg) + 'deg)';
+  refreshCone();
+}
+/* 25m 이상 벗어났을 때만 부드럽게 따라가기 (매번 panTo하면 덜컹거림) */
+function followPan(lat, lng) {
+  if (!state.follow || !state.adapter) return;
+  const lp = state.lastPanAt;
+  if (!lp || haversineM(lp, { lat, lng }) > 25) {
+    state.adapter.panTo(lat, lng);
+    state.lastPanAt = { lat, lng };
+  }
+}
+function ensureFollowWatch() {
+  if (!state.follow || nav.active || followWatchId != null || !navigator.geolocation) return;
+  followWatchId = navigator.geolocation.watchPosition(pos => {
+    const lat = pos.coords.latitude, lng = pos.coords.longitude;
+    state.myLoc = { lat, lng };
+    state.adapter.setUserLocation(lat, lng);
+    updateHeadingFromGPS(lat, lng);
+    followPan(lat, lng);
+    refreshCone();
+  }, () => {}, { enableHighAccuracy: true, maximumAge: 2000, timeout: 10000 });
+}
+function clearFollowWatch() {
+  if (followWatchId != null) { try { navigator.geolocation.clearWatch(followWatchId); } catch (e) {} followWatchId = null; }
+}
+async function enterFollow() {
+  if (state.follow) return;
   try {
     if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
       await DeviceOrientationEvent.requestPermission();
     }
   } catch (e) {}
-  compassMode = compassMode === 'north' ? 'heading' : 'north';
-  updateCompass();
-  toast(compassMode === 'heading' ? '진행 방향이 위로 표시됩니다' : '북쪽 고정으로 표시됩니다');
+  toast('현위치 찾는 중…');
+  const p = await getGPS(8000);
+  if (!p) { toast('위치를 가져오지 못했어요. 권한을 확인해 주세요.'); return; }
+  state.follow = true;
+  state.lastPanAt = { lat: p.lat, lng: p.lng };
+  state.adapter.panTo(p.lat, p.lng);
+  state.adapter.setUserLocation(p.lat, p.lng);
+  syncFollowUI();
+  ensureFollowWatch();
+  refreshCone();
+  toast('현위치를 따라갑니다');
+}
+function exitFollow() {
+  if (!state.follow) return;
+  state.follow = false;
+  clearFollowWatch();
+  syncFollowUI();
+  refreshCone();
 }
 window.addEventListener('deviceorientation', e => {
   let h = null;
   if (e.webkitCompassHeading != null && !isNaN(e.webkitCompassHeading)) h = e.webkitCompassHeading;
   else if (e.alpha != null && !isNaN(e.alpha)) h = (360 - e.alpha) % 360;
-  if (h != null) { headingDeg = h; updateCompass(); }
+  if (h != null) { headingDeg = h; updateHeading(); }
 });
 function updateHeadingFromGPS(lat, lng) {
   const now = Date.now();
@@ -1182,7 +1285,7 @@ function updateHeadingFromGPS(lat, lng) {
       const x = Math.cos(lastGpsForHeading.lat * r) * Math.sin(lat * r) -
         Math.sin(lastGpsForHeading.lat * r) * Math.cos(lat * r) * Math.cos((lng - lastGpsForHeading.lng) * r);
       headingDeg = (Math.atan2(y, x) / r + 360) % 360;
-      updateCompass();
+      updateHeading();
     }
   }
   lastGpsForHeading = { lat, lng, t: now };
@@ -1272,17 +1375,8 @@ async function init() {
   };
   syncInputClear();
   $('clearBtn').onclick = clearAll;
-  $('compass').onclick = onCompassTap;
-  $('locBtn').onclick = async () => {
-    toast('현위치 찾는 중…');
-    const p = await getGPS(8000);
-    if (p) {
-      state.adapter.panTo(p.lat, p.lng);
-      state.adapter.setUserLocation(p.lat, p.lng);
-      toast('현위치로 이동했어요');
-    }
-    else toast('위치를 가져오지 못했어요. 권한을 확인해 주세요.');
-  };
+  $('compass').onclick = () => exitFollow(); // 탭: 따라가기 종료 → 북쪽 고정 자유 지도로
+  $('locBtn').onclick = () => { if (state.follow) exitFollow(); else enterFollow(); };
   $('setBtn').onclick = openSettings;
   $('setClose').onclick = closeSettings;
   $('settingsModal').addEventListener('click', e => { if (e.target.id === 'settingsModal') closeSettings(); });
@@ -1307,9 +1401,10 @@ async function init() {
 
   await initMap();
   if (!state.adapter) return;
+  // 사용자가 직접 지도를 드래그하면 따라가기 종료
+  state.adapter.onUserDrag(() => { if (state.follow) exitFollow(); });
   const p = await getGPS(6000);
   if (p) { state.adapter.setCenter(p.lat, p.lng); state.adapter.setUserLocation(p.lat, p.lng); }
-  updateCompass();
 }
 document.addEventListener('DOMContentLoaded', init);
 </script>
