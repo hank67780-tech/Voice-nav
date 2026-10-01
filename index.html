@@ -18,8 +18,9 @@
 html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
   font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR",sans-serif;
   overscroll-behavior:none}
-#map{position:fixed;inset:0;z-index:0;background:#0d0d0d;touch-action:none}
-/* 지도는 항상 북쪽 고정. 방향 표시는 내 위치 마커의 콘(cone)이 담당 */
+#map{position:fixed;inset:0;z-index:0;background:#0d0d0d;touch-action:none;transition:transform .25s linear}
+/* 따라가기 모드에서는 진행 방향이 위로 오도록 회전. 카카오 지도는 래스터 타일이라
+   글씨도 함께 돌아감 (네이버처럼 글씨만 고정하려면 벡터 지도가 필요) */
 .leaflet-container{background:#0d0d0d;font-family:inherit}
 
 /* 상단 검색바 */
@@ -407,15 +408,17 @@ class KakaoAdapter {
       const el = document.createElement('div');
       el.className = 'ucone';
       el.innerHTML = '<svg width="72" height="72" viewBox="0 0 72 72"><path d="M36 36 L19 7 A34 34 0 0 1 53 7 Z" fill="rgba(10,132,255,.30)"/></svg>';
-      el.style.display = 'none';
       this.coneEl = el;
+      // 주의: content를 display:none으로 만든 채 오버레이를 생성하면 앵커(0.5,0.5) 측정이 어긋나
+      // 파란 점과 콘 위치가 어긋나 보이므로, 가시성은 setMap(null)으로 제어한다
       this.coneOv = new kakao.maps.CustomOverlay({ position: pos, content: el, xAnchor: 0.5, yAnchor: 0.5 });
-      this.coneOv.setMap(this.map);
-    } else this.coneOv.setPosition(pos);
+    } else {
+      this.coneOv.setPosition(pos);
+    }
+    this.coneOv.setMap(this.map);
     this.coneEl.style.transform = 'rotate(' + deg + 'deg)';
-    this.coneEl.style.display = 'block';
   }
-  hideCone() { if (this.coneEl) this.coneEl.style.display = 'none'; }
+  hideCone() { if (this.coneOv) this.coneOv.setMap(null); }
   onUserDrag(cb) { this._onUserDrag = cb; }
   searchKeyword(q, near) {
     return new Promise(resolve => {
@@ -1195,8 +1198,9 @@ async function rerouteFromHere(lat, lng) {
 }
 
 /* ================= 현위치 따라가기 + 방향 표시 =================
-   지도는 항상 북쪽 고정. 내 위치 파란 점 앞의 부채꼴(cone)이 진행 방향을 가리킨다 (네이버식).
-   위치 버튼: 탭하면 현위치로 이동 + 따라가기 토글. 나침반은 따라가기 중에만 보이고,
+   따라가기 모드에서는 진행 방향이 화면 위로 오도록 지도가 회전한다 (네비식).
+   내 위치 파란 점 앞의 부채꼴(cone)도 함께 표시.
+   위치 버튼: 탭하면 현위치로 이동 + 따라가기(회전) 토글. 나침반은 따라가기 중에만 보이고,
    탭하면 따라가기를 끄고 북쪽 고정 자유 지도로 돌아온다. */
 let headingDeg = null;
 let lastGpsForHeading = null;
@@ -1204,6 +1208,17 @@ let followWatchId = null;
 function syncFollowUI() {
   $('compass').classList.toggle('on', state.follow);
   $('locBtn').classList.toggle('active', state.follow);
+  applyMapRotation();
+}
+/* 따라가기 모드: 진행 방향이 화면 위로 오도록 지도 회전.
+   scale(1.45)을 함께 줘서 회전 시 모서리 잘림 방지 */
+function applyMapRotation() {
+  const el = $('map');
+  if (state.follow && headingDeg != null) {
+    el.style.transform = 'rotate(' + (-headingDeg) + 'deg) scale(1.45)';
+  } else {
+    el.style.transform = '';
+  }
 }
 function refreshCone() {
   if (!state.adapter) return;
@@ -1217,6 +1232,7 @@ function updateHeading() {
   if (headingDeg == null) return;
   $('cdeg').textContent = Math.round(headingDeg) + '°';
   $('cdial').style.transform = 'rotate(' + (-headingDeg) + 'deg)';
+  applyMapRotation();
   refreshCone();
 }
 /* 25m 이상 벗어났을 때만 부드럽게 따라가기 (매번 panTo하면 덜컹거림) */
