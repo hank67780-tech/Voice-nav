@@ -197,7 +197,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
         <input id="tmapKey" placeholder="TMap appKey" autocomplete="off">
         <button id="tmapSave">저장</button>
       </div>
-      <div class="hint">openapi.sk.com에서 "보행자 경로안내" 상품을 구독한 앱의 appKey를 입력하면 도보 경로를 TMap(한국 도보 데이터)으로 계산합니다. 키가 없거나 연결에 실패하면 공개 서버(OSM)로 계산합니다.</div>
+      <div class="hint">기본 내장 키로 동작 중이라 별도 입력 없이 바로 쓸 수 있어요. 자기 키를 쓰고 싶으면 여기에 입력하세요. 비우면 내장 기본 키로 돌아갑니다. 키가 없거나 연결에 실패하면 공개 서버(OSM)로 계산합니다.</div>
     </div>
     <button class="mclose" id="setClose">닫기</button>
   </div>
@@ -209,6 +209,9 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 'use strict';
 /* ================= 설정 ================= */
 const KAKAO_JS_KEY = '1259ea885fdd86c4ef6a770b5882ecd7';
+/* TMap 내장 기본 키: 설정에서 별도 키를 입력하지 않으면 이 키로 도보 경로 계산.
+   누구나 URL만 열면 바로 쓸 수 있게 하는 공개 앱용 기본값. 비워두면 예전처럼 키 입력시에만 TMap 사용. */
+const TMAP_DEFAULT_KEY = 'plgom5wLSE3tlDPmzvVLH5ZBVE92FjwZ8RmlMhV0';
 const KAKAO_SDK_URL = 'https://dapi.kakao.com/v2/maps/sdk.js?appkey=' + KAKAO_JS_KEY + '&libraries=services&autoload=false';
 const LEAFLET_JS = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
 const SEOUL = { lat: 37.5665, lng: 126.9780 };
@@ -426,14 +429,20 @@ async function geocode(query, near) {
 
 /* 지하철역이면 상대편에서 가장 가까운 출구 좌표로 스냅 */
 function isSubwayStation(place) {
-  if (!place || !place.name || !/역$/.test(place.name)) return false;
+  if (!place || !place.name) return false;
   const cat = place.category || '';
-  return cat.includes('지하철') || cat.includes('전철');
+  if (cat.includes('지하철') || cat.includes('전철')) return true;
+  // 카카오 역 이름이 "구일역 1호선"처럼 호선을 달고 오는 경우가 있음
+  return /역(\s*\d+호선)?$/.test(place.name);
+}
+function stationBaseName(name) {
+  const m = String(name || '').match(/^(.*역)/);
+  return m ? m[1] : name;
 }
 async function nearestExit(station, ref) {
   try {
     if (!(state.kakaoReady && state.adapter instanceof KakaoAdapter)) return null;
-    const list = await state.adapter.searchKeywordList(station.name + ' 출구', { lat: station.lat, lng: station.lng }, 15);
+    const list = await state.adapter.searchKeywordList(stationBaseName(station.name) + ' 출구', { lat: station.lat, lng: station.lng }, 15);
     const exits = (list || []).filter(e => e.name && e.name.includes('출구'));
     if (!exits.length) return null;
     let best = null, bestD = Infinity;
@@ -524,8 +533,9 @@ const ROUTE_HOST = {
 };
 async function fetchRoute(from, to, mode) {
   // 도보: TMap 키가 있으면 TMap 보행자 API(한국 도보 데이터) 우선
+  // (설정에 직접 입력한 키 → 없으면 앱에 내장된 기본 키)
   if (mode === 'walk') {
-    const tkey = (localStorage.getItem('tmap_key') || '').trim();
+    const tkey = (localStorage.getItem('tmap_key') || TMAP_DEFAULT_KEY || '').trim();
     if (tkey) {
       try { return await fetchTmapWalk(from, to, tkey); }
       catch (e) {
@@ -1017,7 +1027,7 @@ async function init() {
   $('tmapKey').value = localStorage.getItem('tmap_key') || '';
   $('tmapSave').onclick = async () => {
     const v = $('tmapKey').value.trim();
-    if (!v) { localStorage.removeItem('tmap_key'); toast('TMap 키 삭제됨.'); return; }
+    if (!v) { localStorage.removeItem('tmap_key'); toast('내장 기본 키로 돌아갑니다.'); return; }
     localStorage.setItem('tmap_key', v);
     toast('연결 테스트 중…');
     try {
