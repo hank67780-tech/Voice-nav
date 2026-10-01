@@ -332,7 +332,7 @@ class KakaoAdapter {
       this.places.keywordSearch(q, (data, status) => {
         if (status === kakao.maps.services.Status.OK && data && data.length) {
           const d = data[0];
-          resolve({ lat: +d.y, lng: +d.x, name: d.place_name || q });
+          resolve({ lat: +d.y, lng: +d.x, name: d.place_name || q, category: d.category_name || '' });
         } else resolve(null);
       }, o);
     });
@@ -422,6 +422,27 @@ async function geocode(query, near) {
     } catch (e) {}
   }
   return await nominatimSearch(q, near);
+}
+
+/* 지하철역이면 상대편에서 가장 가까운 출구 좌표로 스냅 */
+function isSubwayStation(place) {
+  if (!place || !place.name || !/역$/.test(place.name)) return false;
+  const cat = place.category || '';
+  return cat.includes('지하철') || cat.includes('전철');
+}
+async function nearestExit(station, ref) {
+  try {
+    if (!(state.kakaoReady && state.adapter instanceof KakaoAdapter)) return null;
+    const list = await state.adapter.searchKeywordList(station.name + ' 출구', { lat: station.lat, lng: station.lng }, 15);
+    const exits = (list || []).filter(e => e.name && e.name.includes('출구'));
+    if (!exits.length) return null;
+    let best = null, bestD = Infinity;
+    for (const e of exits) {
+      const d = haversineM(ref, e);
+      if (d < bestD) { bestD = d; best = e; }
+    }
+    return best;
+  } catch (e) { return null; }
 }
 
 /* ================= 저장 장소 ================= */
@@ -613,12 +634,13 @@ async function handleCommand(text) {
     const near = state.myLoc || await getGPS(6000);
 
     // 출발지
-    let from;
+    let from, fromSearched = false;
     const fromAlias = resolveAlias(parsed.from);
     if (fromAlias && typeof fromAlias === 'object') from = fromAlias;
     else if (typeof fromAlias === 'string') {
       from = await geocode(fromAlias, near);
       if (!from) throw new Error('from-fail:' + fromAlias);
+      fromSearched = true;
     } else {
       from = near || await getGPS(8000);
       if (!from) throw new Error('no-gps');
@@ -626,9 +648,19 @@ async function handleCommand(text) {
     }
     // 도착지
     const toAlias = resolveAlias(parsed.to);
-    let to;
+    let to, toSearched = false;
     if (toAlias && typeof toAlias === 'object') to = toAlias;
-    else { to = await geocode(toAlias, near); if (!to) throw new Error('to-fail:' + parsed.to); }
+    else { to = await geocode(toAlias, near); if (!to) throw new Error('to-fail:' + parsed.to); toSearched = true; }
+
+    // 지하철역이면 가장 가까운 출구로 스냅 (도착지: 출발지 기준 / 출발지: 도착지 기준)
+    if (fromSearched && isSubwayStation(from) && to) {
+      const ex = await nearestExit(from, to);
+      if (ex) from = { lat: ex.lat, lng: ex.lng, name: ex.name };
+    }
+    if (toSearched && isSubwayStation(to) && from) {
+      const ex = await nearestExit(to, from);
+      if (ex) { to = { lat: ex.lat, lng: ex.lng, name: ex.name }; toast('가장 가까운 출구인 ' + ex.name + '(으)로 안내합니다'); }
+    }
 
     if (['bus', 'subway', 'transit'].includes(parsed.mode)) { showTransit(from, to, parsed.mode); return; }
     await showRoute(from, to, parsed.mode);
