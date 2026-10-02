@@ -1036,6 +1036,15 @@ function parseKakaoBike(data) {
           break;
         }
       }
+      const s0 = leg0.steps && leg0.steps[0];
+      if (s0 && typeof s0 === 'object' && 'path' in s0) {
+        const p = s0.path;
+        if (Array.isArray(p)) {
+          dbg += '|path[arr:' + p.length + ']';
+          if (p.length && Array.isArray(p[0])) dbg += 'p0[arr:' + p[0].length + ']=' + JSON.stringify(p[0]).slice(0, 40);
+          else if (p.length) dbg += 'p0=' + String(p[0]).slice(0, 40);
+        } else dbg += '|path:' + typeof p + '=' + String(p).slice(0, 40);
+      }
       const props = data.route.properties;
       if (props && typeof props === 'object') dbg += '|props:' + Object.keys(props).join(',');
     } else {
