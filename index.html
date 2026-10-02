@@ -357,6 +357,17 @@ class KakaoAdapter {
   }
   setCenter(lat, lng) { this.map.setCenter(new kakao.maps.LatLng(lat, lng)); }
   getCenter() { const c = this.map.getCenter(); return { lat: c.getLat(), lng: c.getLng() }; }
+  resetZoom() { try { this.map.setLevel(5); } catch (e) {} } // 기본 줌으로 복귀
+  /* 하단 시트에 경로가 가려지지 않게: 시트 높이의 절반만큼 화면을 위로 (중심은 아래쪽 지점으로 이동) */
+  shiftForSheet(sheetH) {
+    if (!sheetH || sheetH <= 0) return;
+    try {
+      const proj = this.map.getProjection();
+      const c = this.map.getCenter();
+      const pt = proj.containerPointFromCoords(c);
+      this.map.setCenter(proj.coordsFromContainerPoint(new kakao.maps.Point(pt.x, pt.y + sheetH / 2)));
+    } catch (e) {}
+  }
   panTo(lat, lng) { try { this.map.panTo(new kakao.maps.LatLng(lat, lng)); } catch (e) { this.setCenter(lat, lng); } }
   addMarker(lat, lng, opts) {
     opts = opts || {};
@@ -501,6 +512,16 @@ class LeafletAdapter {
   }
   setCenter(lat, lng) { this.map.setView([lat, lng], this.map.getZoom()); }
   getCenter() { const c = this.map.getCenter(); return { lat: c.lat, lng: c.lng }; }
+  resetZoom() { try { this.map.setZoom(15); } catch (e) {} } // 기본 줌으로 복귀
+  /* 하단 시트에 경로가 가려지지 않게: 시트 높이의 절반만큼 화면을 위로 */
+  shiftForSheet(sheetH) {
+    if (!sheetH || sheetH <= 0) return;
+    try {
+      const size = this.map.getSize();
+      const target = this.map.containerPointToLatLng([size.x / 2, size.y / 2 + sheetH / 2]);
+      this.map.setView(target, this.map.getZoom(), { animate: false });
+    } catch (e) {}
+  }
   panTo(lat, lng) { try { this.map.panTo([lat, lng], { animate: true }); } catch (e) { this.map.panTo([lat, lng]); } }
   addMarker(lat, lng, opts) {
     opts = opts || {};
@@ -1220,6 +1241,8 @@ function showSingleRoute(from, to, mode, route, opts) {
     });
     if ($('altRoutes')) $('altRoutes').onclick = () => loadCarOptions(from, to, opts);
     $('navStart').onclick = startNavigation;
+    // 하단 시트에 경로(특히 짧은 경로의 출발지)가 가려지지 않게 시트 절반 높이만큼 화면을 위로
+    try { const sh = $('sheet').offsetHeight || 0; if (sh > 0) state.adapter.shiftForSheet(sh); } catch (e) {}
     speak(from.name + '에서 ' + to.name + '까지 ' + modeLabel + ' 경로입니다. ' +
       (route.dropLabel ? route.dropLabel + '에서 하차 후 도보로 이동합니다. ' : '') +
       '거리 ' + fmtDist(route.distance) + ', 예상 시간 ' + fmtTime(route.duration));
@@ -1315,6 +1338,7 @@ function startNavigation() {
   // 길안내 중에는 내 위치를 따라감 (나침반 표시, 진행 방향이 위로 오도록 지도 회전)
   state.follow = true; state.lastPanAt = null;
   layoutMapForFollow(); // 회전 시 모서리가 잘리지 않게 맵 div 확대 (이거 빼먹으면 첫 화면이 잘려 보임)
+  state.adapter.resetZoom(); // 축소된 상태에서 시작해도 기본 줌으로
   if (state.myLoc) state.adapter.setCenter(state.myLoc.lat, state.myLoc.lng);
   syncFollowUI();
   // 화면 꺼짐 방지
@@ -1558,6 +1582,7 @@ async function enterFollow() {
   state.lastPanAt = { lat: p.lat, lng: p.lng };
   layoutMapForFollow();
   state.adapter.panTo(p.lat, p.lng);
+  state.adapter.resetZoom(); // 축소된 상태에서 눌러도 기본 줌으로
   state.adapter.setUserLocation(p.lat, p.lng);
   syncFollowUI();
   ensureFollowWatch();
@@ -1565,7 +1590,10 @@ async function enterFollow() {
   toast('현위치를 따라갑니다');
 }
 function recenterToMe() {
-  if (state.myLoc && state.adapter) state.adapter.panTo(state.myLoc.lat, state.myLoc.lng);
+  if (state.myLoc && state.adapter) {
+    state.adapter.panTo(state.myLoc.lat, state.myLoc.lng);
+    state.adapter.resetZoom();
+  }
 }
 function exitFollow(recenter) {
   if (!state.follow) return;
