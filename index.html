@@ -513,7 +513,7 @@ class LeafletAdapter {
   }
   setCenter(lat, lng) { this.map.setView([lat, lng], this.map.getZoom()); }
   getCenter() { const c = this.map.getCenter(); return { lat: c.lat, lng: c.lng }; }
-  resetZoom() { try { this.map.setZoom(15); } catch (e) {} } // 기본 줌으로 복귀
+  resetZoom() { try { this.map.setZoom(15, { animate: false }); } catch (e) {} } // 기본 줌으로 복귀
   /* 하단 시트에 경로가 가려지지 않게: 시트 높이의 절반만큼 화면을 위로 */
   shiftForSheet(sheetH) {
     if (!sheetH || sheetH <= 0) return;
@@ -1582,8 +1582,8 @@ async function enterFollow() {
   state.follow = true;
   state.lastPanAt = { lat: p.lat, lng: p.lng };
   layoutMapForFollow();
+  state.adapter.resetZoom(); // panTo 애니메이션보다 먼저 (순서가 뒤바뀌면 이동이 취소됨)
   state.adapter.panTo(p.lat, p.lng);
-  state.adapter.resetZoom(); // 축소된 상태에서 눌러도 기본 줌으로
   state.adapter.setUserLocation(p.lat, p.lng);
   syncFollowUI();
   ensureFollowWatch();
@@ -1592,8 +1592,8 @@ async function enterFollow() {
 }
 function recenterToMe() {
   if (state.myLoc && state.adapter) {
+    state.adapter.resetZoom(); // panTo 애니메이션보다 먼저 (순서가 뒤바뀌면 이동이 취소됨)
     state.adapter.panTo(state.myLoc.lat, state.myLoc.lng);
-    state.adapter.resetZoom();
   }
 }
 function exitFollow(recenter) {
