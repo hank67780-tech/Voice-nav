@@ -1012,7 +1012,12 @@ function parseKakaoBike(data) {
             for (let i = 0; i + 1 < v.length; i += 2) pts.push([v[i + 1], v[i]]);
             continue;
           }
-          const p = st.path || st.coordinates || st.lineString || [];
+          // path가 배열인 경우: [[경도,위도],...]
+          let p = st.path || st.coordinates || st.lineString || [];
+          // path가 객체인 경우: {coordinates:[[경도,위도],...]} 등
+          if (p && typeof p === 'object' && !Array.isArray(p)) {
+            p = p.coordinates || p.points || p.vertexes || p.path || [];
+          }
           for (const c of p) if (c && c.length >= 2) pts.push([c[1], c[0]]);
         }
       }
@@ -1043,6 +1048,13 @@ function parseKakaoBike(data) {
           dbg += '|path[arr:' + p.length + ']';
           if (p.length && Array.isArray(p[0])) dbg += 'p0[arr:' + p[0].length + ']=' + JSON.stringify(p[0]).slice(0, 40);
           else if (p.length) dbg += 'p0=' + String(p[0]).slice(0, 40);
+        } else if (p && typeof p === 'object') {
+          dbg += '|path{' + Object.keys(p).join(',') + '}';
+          const coords = p.coordinates || p.points || p.vertexes || p.lineString;
+          if (Array.isArray(coords)) {
+            dbg += '[arr:' + coords.length + ']';
+            if (coords.length) dbg += 'c0=' + JSON.stringify(coords[0]).slice(0, 50);
+          }
         } else dbg += '|path:' + typeof p + '=' + String(p).slice(0, 40);
       }
       const props = data.route.properties;
