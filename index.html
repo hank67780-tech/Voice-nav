@@ -868,6 +868,10 @@ async function fetchRoute(from, to, mode) {
       catch (e) { /* 폴백: 아래 공개 서버 */ }
     }
   }
+  return fetchOsrmRoute(from, to, mode);
+}
+/* OSRM 공개 서버 경로 (도보/자전거 폴백, 자전거 추천 옵션) */
+async function fetchOsrmRoute(from, to, mode) {
   const host = ROUTE_HOST[mode] || ROUTE_HOST.walk;
   const url = host + '/route/v1/driving/' +
     from.lng + ',' + from.lat + ';' + to.lng + ',' + to.lat +
@@ -927,7 +931,8 @@ async function fetchBRouterBike(from, to, profile) {
   if (!coords || coords.length < 2) throw new Error('brouter-no-route');
   const points = coords.map(c => [c[1], c[0]]);
   const distance = +((f.properties && f.properties['track-length']) || 0);
-  const duration = +((f.properties && f.properties['total-time']) || 0);
+  // shortest 프로필은 시간 추정이 비현실적이라(저속 가정) 15km/h 기준으로 환산
+  const duration = profile === 'shortest' ? distance / 4.1667 : +((f.properties && f.properties['total-time']) || 0);
   const steps = synthBikeSteps(points);
   let cum = 0;
   const targets = steps.map(s => { const t = { cumDist: cum, step: s }; cum += (s.distance || 0); return t; });
@@ -1251,6 +1256,47 @@ function selectCarOption(idx, from, to, opts) {
   document.querySelectorAll('#sheet .ropt').forEach(b => b.classList.toggle('on', +b.dataset.i === idx));
 }
 /* "다른 경로 보기": 추천/최단거리/무료우선을 그때 가져오기 (기본 검색은 추천 1개만 = API 절약) */
+
+/* 자전거 경로 옵션: 추천(OSRM)/최단거리/자전거도로 우선(BRouter)을 병렬로 조회 (무료라 API 부담 없음) */
+const BIKE_ROUTE_OPTIONS = [
+  { key: 'osrm', label: '추천' },
+  { key: 'shortest', label: '최단거리' },
+  { key: 'safety', label: '자전거도로 우선' }
+];
+async function fetchBikeOptions(from, to) {
+  const settled = await Promise.allSettled(BIKE_ROUTE_OPTIONS.map(o =>
+    o.key === 'osrm' ? fetchOsrmRoute(from, to, 'bike') : fetchBRouterBike(from, to, o.key)
+  ));
+  const out = [];
+  settled.forEach((r, i) => {
+    if (r.status === 'fulfilled' && r.value && r.value.points && r.value.points.length > 1) {
+      out.push(Object.assign({ optLabel: BIKE_ROUTE_OPTIONS[i].label }, r.value));
+    }
+  });
+  return out;
+}
+/* 자전거 경로 옵션 선택: 해당 옵션으로 지도+시트 갱신 */
+function selectBikeOption(idx, from, to, opts) {
+  state.routeOptIdx = idx;
+  const opt = state.routeOptions[idx];
+  showSingleRoute(from, to, 'bike', opt, opts || {});
+  document.querySelectorAll('#sheet .ropt').forEach(b => b.classList.toggle('on', +b.dataset.i === idx));
+}
+async function loadBikeOptions(from, to, opts) {
+  toast('다른 경로 찾는 중…');
+  const options = await fetchBikeOptions(from, to).catch(() => []);
+  if (options.length >= 2) {
+    state.routeOptions = options;
+    // 설정의 자전거 기본 경로를 기본 선택
+    const pref = getRoutePref('bike');
+    const prefLabel = (BIKE_ROUTE_OPTIONS.find(o => o.key === pref) || BIKE_ROUTE_OPTIONS[0]).label;
+    let idx = options.findIndex(o => o.optLabel === prefLabel);
+    if (idx < 0) idx = 0;
+    selectBikeOption(idx, from, to, opts);
+  } else {
+    toast('대체 경로를 찾지 못했어요.');
+  }
+}
 async function loadCarOptions(from, to, opts) {
   const tkey = (localStorage.getItem('tmap_key') || TMAP_DEFAULT_KEY || '').trim();
   if (!tkey) { toast('TMap 키가 필요해요.'); return; }
@@ -1294,17 +1340,19 @@ function showSingleRoute(from, to, mode, route, opts) {
     } else if (mode === 'walk' && !hybrid && route.distance > 0) {
       extraInfo = '<div class="hint">🔥 예상 소모 약 ' + Math.round(route.distance * 0.05) + 'kcal</div>';
     }
-    // 자동차 경로 옵션 선택 UI (추천/최단거리/무료우선)
-    const routeOpts = (mode === 'car' && state.routeOptions && state.routeOptions.length >= 2)
+    // 경로 옵션 선택 UI (자동차: 추천/최단거리/무료우선, 자전거: 추천/최단거리/자전거도로 우선)
+    const routeOpts = ((mode === 'car' || mode === 'bike') && state.routeOptions && state.routeOptions.length >= 2)
       ? '<div class="ropts">' + state.routeOptions.map((o, i) =>
           '<button class="ropt' + (i === (state.routeOptIdx || 0) ? ' on' : '') + '" data-i="' + i + '">' +
           '<b>' + o.optLabel + '</b><span>' + fmtTime(o.duration) + ' · ' + fmtDist(o.distance) + '</span></button>'
         ).join('') + '</div>'
       : '';
-    // "다른 경로 보기" 버튼 (자동차 + TMap 키 있을 때, 옵션 미표시 상태에서만)
+    // "다른 경로 보기" 버튼 (옵션 미표시 상태에서만)
     const tkey = (localStorage.getItem('tmap_key') || TMAP_DEFAULT_KEY || '').trim();
-    const altBtn = (mode === 'car' && tkey && !(state.routeOptions && state.routeOptions.length >= 2))
-      ? '<button class="btn ghost" id="altRoutes" style="width:100%;margin-top:10px">다른 경로 보기 (최단거리 · 무료우선)</button>'
+    const noOpts = !(state.routeOptions && state.routeOptions.length >= 2);
+    const altBtn = noOpts && ((mode === 'car' && tkey) || mode === 'bike')
+      ? '<button class="btn ghost" id="altRoutes" data-kind="' + mode + '" style="width:100%;margin-top:10px">다른 경로 보기 (' +
+        (mode === 'bike' ? '최단거리 · 자전거도로 우선' : '최단거리 · 무료우선') + ')</button>'
       : '';
     openSheet(
       '<h3>' + from.name + ' → ' + to.name + '</h3>' +
@@ -1326,9 +1374,12 @@ function showSingleRoute(from, to, mode, route, opts) {
       c.onclick = () => { const m = c.dataset.mode; closeSheet(); rerouteWithMode(m); };
     });
     document.querySelectorAll('#sheet .ropt').forEach(b => {
-      b.onclick = () => selectCarOption(+b.dataset.i, from, to, opts);
+      b.onclick = () => (mode === 'bike' ? selectBikeOption : selectCarOption)(+b.dataset.i, from, to, opts);
     });
-    if ($('altRoutes')) $('altRoutes').onclick = () => loadCarOptions(from, to, opts);
+    if ($('altRoutes')) $('altRoutes').onclick = () => {
+      if ($('altRoutes').dataset.kind === 'bike') loadBikeOptions(from, to, opts);
+      else loadCarOptions(from, to, opts);
+    };
     $('navStart').onclick = startNavigation;
     // 하단 시트에 경로(특히 짧은 경로의 출발지)가 가려지지 않게 시트 절반 높이만큼 화면을 위로
     try { const sh = $('sheet').offsetHeight || 0; if (sh > 0) state.adapter.shiftForSheet(sh); } catch (e) {}
