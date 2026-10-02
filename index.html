@@ -988,7 +988,20 @@ function parseKakaoBike(data) {
         duration: +p.totalTime || +p.duration || 0 };
     }
   } catch (e) {}
-  return null;
+  // 시도 3: route 단수형 (route.properties + route.geometry)
+  try {
+    const r = data.route;
+    if (r && r.geometry && r.geometry.coordinates && r.geometry.coordinates.length >= 2) {
+      const pts = r.geometry.coordinates.map(c => [c[1], c[0]]);
+      const p = r.properties || {};
+      return { points: pts,
+        distance: +p.totalDistance || +p.distance || 0,
+        duration: +p.totalTime || +p.duration || 0 };
+    }
+  } catch (e) {}
+  // 파싱 실패: 응답 최상위 키를 에러에 담아 디버깅
+  const keys = data && typeof data === 'object' ? Object.keys(data).join(',') : typeof data;
+  throw new Error('kakao-bike-parse[' + keys + ']');
 }
 async function fetchKakaoBike(from, to) {
   const kkey = (localStorage.getItem('kakao_rest_key') || '').trim();
@@ -1001,7 +1014,6 @@ async function fetchKakaoBike(from, to) {
   const res = await fetch(url);
   if (!res.ok) throw new Error('kakao-bike-' + res.status);
   const parsed = parseKakaoBike(await res.json());
-  if (!parsed) throw new Error('kakao-bike-parse');
   let { points, distance, duration } = parsed;
   if (!(distance > 0)) {
     distance = 0;
