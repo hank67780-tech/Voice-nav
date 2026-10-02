@@ -783,8 +783,14 @@ function clearAll() {
   if (wasNav) recenterToMe();
   toast('경로를 지웠어요');
 }
+/* "현재 위치/여기" 등은 GPS로 해석 (지오코딩하면 엉뚱한 장소가 잡힘) */
+function isCurrentLoc(name) {
+  if (!name) return false;
+  return ['현재위치', '현위치', '내위치', '여기', '이곳', '현재'].includes(name.replace(/\s+/g, ''));
+}
 function resolveAlias(name) {
   if (!name) return null;
+  if (isCurrentLoc(name)) return null; // GPS 사용
   const p = state.savedPlaces[name];
   if (p) return { lat: p.lat, lng: p.lng, name: name };
   return name; // 문자열 그대로 (지오코딩 대상)
@@ -942,13 +948,14 @@ async function fetchBRouterBike(from, to, profile) {
   const distance = +((f.properties && f.properties['track-length']) || 0);
   // shortest 프로필은 시간 추정이 비현실적이라(저속 가정) 15km/h 기준으로 환산
   const duration = profile === 'shortest' ? distance / 4.1667 : +((f.properties && f.properties['total-time']) || 0);
-  // 고도 데이터(3번째 값)로 총 상승/하강 계산
-  let ascend = 0, descend = 0;
-  for (let i = 1; i < coords.length; i++) {
-    const a = coords[i - 1][2], b = coords[i][2];
-    if (a == null || b == null) continue;
-    const dd = b - a;
-    if (dd > 0) ascend += dd; else descend -= dd;
+  // 고도 데이터(3번째 값)로 총 상승/하강 계산 (3m 히스테리시스로 측정 노이즈 제거)
+  let ascend = 0, descend = 0, refE = null;
+  for (let i = 0; i < coords.length; i++) {
+    const e = coords[i][2];
+    if (e == null) continue;
+    if (refE == null) { refE = e; continue; }
+    if (e - refE >= 3) { ascend += e - refE; refE = e; }
+    else if (refE - e >= 3) { descend += refE - e; refE = e; }
   }
   const steps = synthBikeSteps(points);
   let cum = 0;
@@ -1234,6 +1241,11 @@ async function handleCommand(text) {
     const toAlias = resolveAlias(parsed.to);
     let to, toSearched = false;
     if (toAlias && typeof toAlias === 'object') to = toAlias;
+    else if (isCurrentLoc(parsed.to)) {
+      const g = near || await getGPS(8000);
+      if (!g) throw new Error('no-gps');
+      to = { lat: g.lat, lng: g.lng, name: '현재 위치' };
+    }
     else { to = await geocode(toAlias, near); if (!to) throw new Error('to-fail:' + parsed.to); toSearched = true; }
 
     // 지하철역이면 가장 가까운 출구로 스냅 (도착지: 출발지 기준 / 출발지: 도착지 기준)
