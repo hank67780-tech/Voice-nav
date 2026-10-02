@@ -999,9 +999,20 @@ function parseKakaoBike(data) {
         duration: +p.totalTime || +p.duration || 0 };
     }
   } catch (e) {}
-  // 파싱 실패: 응답 최상위 키를 에러에 담아 디버깅
-  const keys = data && typeof data === 'object' ? Object.keys(data).join(',') : typeof data;
-  throw new Error('kakao-bike-parse[' + keys + ']');
+  // 파싱 실패: 응답 구조를 에러에 담아 디버깅
+  let dbg = data && typeof data === 'object' ? Object.keys(data).join(',') : typeof data;
+  try {
+    if (data && data.route && typeof data.route === 'object') {
+      dbg += '|route:' + Object.keys(data.route).join(',');
+      // route 안의 좌표 후보 필드 탐색
+      for (const k of Object.keys(data.route)) {
+        const v = data.route[k];
+        if (Array.isArray(v)) dbg += '|' + k + '[arr:' + v.length + ']';
+        else if (v && typeof v === 'object') dbg += '|' + k + '{' + Object.keys(v).join(',') + '}';
+      }
+    }
+  } catch (e) {}
+  throw new Error('kakao-bike-parse[' + dbg + ']');
 }
 async function fetchKakaoBike(from, to) {
   const kkey = (localStorage.getItem('kakao_rest_key') || '').trim();
