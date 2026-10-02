@@ -1124,21 +1124,6 @@ async function handleCommand(text) {
 async function showRoute(from, to, mode, opts) {
   opts = opts || {};
   if (!opts.quiet) sheetLoading('경로 계산 중…');
-  const tkey = (localStorage.getItem('tmap_key') || TMAP_DEFAULT_KEY || '').trim();
-  // 자동차: 추천/최단거리/무료우선 3개 경로를 병렬 조회 후 선택 UI 제공
-  if (mode === 'car' && tkey) {
-    const options = await fetchCarOptions(from, to, tkey).catch(() => []);
-    if (options.length >= 2) {
-      state.routeOptions = options;
-      selectCarOption(0, from, to, opts);
-      return options[0];
-    }
-    if (options.length === 1) {
-      state.routeOptions = null;
-      return showSingleRoute(from, to, mode, options[0], opts);
-    }
-    // 전부 실패 → 아래 기존 폴백 (TMap 단일 + OSRM)
-  }
   state.routeOptions = null;
   const route = await fetchRoute(from, to, mode);
   return showSingleRoute(from, to, mode, route, opts);
@@ -1149,6 +1134,19 @@ function selectCarOption(idx, from, to, opts) {
   const opt = state.routeOptions[idx];
   showSingleRoute(from, to, 'car', opt, opts || {});
   document.querySelectorAll('#sheet .ropt').forEach(b => b.classList.toggle('on', +b.dataset.i === idx));
+}
+/* "다른 경로 보기": 추천/최단거리/무료우선을 그때 가져오기 (기본 검색은 추천 1개만 = API 절약) */
+async function loadCarOptions(from, to, opts) {
+  const tkey = (localStorage.getItem('tmap_key') || TMAP_DEFAULT_KEY || '').trim();
+  if (!tkey) { toast('TMap 키가 필요해요.'); return; }
+  toast('다른 경로 찾는 중…');
+  const options = await fetchCarOptions(from, to, tkey).catch(() => []);
+  if (options.length >= 2) {
+    state.routeOptions = options;
+    selectCarOption(0, from, to, opts);
+  } else {
+    toast('대체 경로를 찾지 못했어요.');
+  }
 }
 function showSingleRoute(from, to, mode, route, opts) {
   opts = opts || {};
@@ -1184,6 +1182,11 @@ function showSingleRoute(from, to, mode, route, opts) {
           '<b>' + o.optLabel + '</b><span>' + fmtTime(o.duration) + ' · ' + fmtDist(o.distance) + '</span></button>'
         ).join('') + '</div>'
       : '';
+    // "다른 경로 보기" 버튼 (자동차 + TMap 키 있을 때, 옵션 미표시 상태에서만)
+    const tkey = (localStorage.getItem('tmap_key') || TMAP_DEFAULT_KEY || '').trim();
+    const altBtn = (mode === 'car' && tkey && !(state.routeOptions && state.routeOptions.length >= 2))
+      ? '<button class="btn ghost" id="altRoutes" style="width:100%;margin-top:10px">다른 경로 보기 (최단거리 · 무료우선)</button>'
+      : '';
     openSheet(
       '<h3>' + from.name + ' → ' + to.name + '</h3>' +
       routeOpts +
@@ -1193,6 +1196,7 @@ function showSingleRoute(from, to, mode, route, opts) {
       legInfo +
       trafficLegend +
       extraInfo +
+      altBtn +
       modeChips(mode) +
       '<div class="btnrow">' +
       '<button class="btn" id="navStart">길안내 시작</button>' +
@@ -1205,6 +1209,7 @@ function showSingleRoute(from, to, mode, route, opts) {
     document.querySelectorAll('#sheet .ropt').forEach(b => {
       b.onclick = () => selectCarOption(+b.dataset.i, from, to, opts);
     });
+    if ($('altRoutes')) $('altRoutes').onclick = () => loadCarOptions(from, to, opts);
     $('navStart').onclick = startNavigation;
     speak(from.name + '에서 ' + to.name + '까지 ' + modeLabel + ' 경로입니다. ' +
       (route.dropLabel ? route.dropLabel + '에서 하차 후 도보로 이동합니다. ' : '') +
