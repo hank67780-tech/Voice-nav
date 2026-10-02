@@ -133,6 +133,8 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
   padding:calc(12px + env(safe-area-inset-top)) 16px 14px}
 .guidance.on{display:block}
 .guidance .gdist{font-size:15px;color:var(--accent);font-weight:700;margin-bottom:2px}
+.guidance .grow{display:flex;justify-content:space-between;align-items:baseline}
+.guidance .gspeed{font-size:20px;font-weight:800}
 .guidance .gturn{font-size:30px;font-weight:800;line-height:1.25}
 .guidance .gdest{font-size:13px;color:var(--muted);margin-top:6px}
 .guidance .gstop{margin-top:10px;width:100%;padding:12px;border:none;border-radius:12px;
@@ -216,7 +218,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 <div class="sheet" id="sheet"></div>
 
 <div class="guidance" id="guidance">
-  <div class="gdist" id="gDist">--</div>
+  <div class="grow"><div class="gdist" id="gDist">--</div><div class="gspeed" id="gSpeed"></div></div>
   <div class="gturn" id="gTurn">--</div>
   <div class="gdest" id="gDest"></div>
   <button class="gstop" id="gStop">길안내 종료</button>
@@ -328,6 +330,13 @@ function fmtTime(s) {
   const m = Math.round(s / 60);
   if (m < 60) return m + '분';
   return Math.floor(m / 60) + '시간 ' + (m % 60) + '분';
+}
+/* 도착 예정 시각 ("오후 5시 42분 도착") */
+function fmtEta(sec) {
+  const t = new Date(Date.now() + Math.max(0, sec) * 1000);
+  const ap = t.getHours() < 12 ? '오전' : '오후';
+  let h = t.getHours() % 12; if (h === 0) h = 12;
+  return ap + ' ' + h + '시 ' + t.getMinutes() + '분 도착';
 }
 function loadScript(src, timeoutMs) {
   return new Promise((resolve, reject) => {
@@ -933,10 +942,19 @@ async function fetchBRouterBike(from, to, profile) {
   const distance = +((f.properties && f.properties['track-length']) || 0);
   // shortest 프로필은 시간 추정이 비현실적이라(저속 가정) 15km/h 기준으로 환산
   const duration = profile === 'shortest' ? distance / 4.1667 : +((f.properties && f.properties['total-time']) || 0);
+  // 고도 데이터(3번째 값)로 총 상승/하강 계산
+  let ascend = 0, descend = 0;
+  for (let i = 1; i < coords.length; i++) {
+    const a = coords[i - 1][2], b = coords[i][2];
+    if (a == null || b == null) continue;
+    const dd = b - a;
+    if (dd > 0) ascend += dd; else descend -= dd;
+  }
   const steps = synthBikeSteps(points);
   let cum = 0;
   const targets = steps.map(s => { const t = { cumDist: cum, step: s }; cum += (s.distance || 0); return t; });
-  return { points, distance, duration, steps, targets, total: cum, via: 'brouter-' + profile };
+  return { points, distance, duration, steps, targets, total: cum, via: 'brouter-' + profile,
+    elevation: { ascend: Math.round(ascend), descend: Math.round(descend) } };
 }
 
 /* ================= TMap 보행자 경로 ================= */
@@ -1339,6 +1357,8 @@ function showSingleRoute(from, to, mode, route, opts) {
         ' · 통행료 ' + (route.tollFare > 0 ? Number(route.tollFare).toLocaleString() + '원' : '없음') + '</div>';
     } else if (mode === 'walk' && !hybrid && route.distance > 0) {
       extraInfo = '<div class="hint">🔥 예상 소모 약 ' + Math.round(route.distance * 0.05) + 'kcal</div>';
+    } else if (mode === 'bike' && route.elevation) {
+      extraInfo = '<div class="hint">⛰️ 총 상승 ' + route.elevation.ascend + 'm · 하강 ' + route.elevation.descend + 'm</div>';
     }
     // 경로 옵션 선택 UI (자동차: 추천/최단거리/무료우선, 자전거: 추천/최단거리/자전거도로 우선)
     const optMin = mode === 'bike' ? 1 : 2;
@@ -1360,7 +1380,7 @@ function showSingleRoute(from, to, mode, route, opts) {
       '<h3>' + from.name + ' → ' + to.name + '</h3>' +
       routeOpts +
       '<div class="meta"><span>거리 <b>' + fmtDist(route.distance) + '</b></span>' +
-      '<span>예상 <b>' + fmtTime(route.duration) + '</b></span>' +
+      '<span>예상 <b>' + fmtTime(route.duration) + '</b> · ' + fmtEta(route.duration) + '</span>' +
       '<span>' + modeLabel + '</span></div>' +
       legInfo +
       trafficLegend +
@@ -1471,6 +1491,7 @@ function startNavigation() {
   nav.total = nav.cum[nav.cum.length - 1];
   nav.targets = lr.targets; nav.stepIdx = 0; nav.announced = {}; nav.offCount = 0;
   nav.dest = lr.to; nav.active = true;
+  nav.mode = lr.mode; nav.totalDur = lr.duration || 0; nav.lastSpd = null; nav.spdSm = null;
   $('guidance').classList.add('on');
   $('clearBtn').classList.remove('on');
   $('gDest').textContent = '목적지: ' + lr.to.name + ' · ' + MODE_LABEL[lr.mode];
@@ -1499,6 +1520,7 @@ function stopNavigation(silent) {
   if (nav.watchId != null) { try { navigator.geolocation.clearWatch(nav.watchId); } catch (e) {} nav.watchId = null; }
   if (nav.wakeLock) { try { nav.wakeLock.release(); } catch (e) {} nav.wakeLock = null; }
   $('guidance').classList.remove('on');
+  $('gSpeed').textContent = '';
   if (state.lastRoute) $('clearBtn').classList.add('on');
   if (!silent) speak('길안내를 종료합니다.');
 }
@@ -1538,6 +1560,21 @@ function onNavPos(pos) {
     stopNavigation(true);
     return;
   }
+  // 현재 속도 (GPS speed 우선, 없으면 위치 변화로 계산) + 도착 예정 시각
+  const nowMs = Date.now();
+  let spd = (pos.coords.speed != null && pos.coords.speed >= 0) ? pos.coords.speed * 3.6 : null;
+  if (spd == null && nav.lastSpd && nowMs > nav.lastSpd.t) {
+    const dt = (nowMs - nav.lastSpd.t) / 1000;
+    if (dt >= 1) spd = haversineM(nav.lastSpd, { lat, lng }) / dt * 3.6;
+  }
+  nav.lastSpd = { lat, lng, t: nowMs };
+  if (spd != null && isFinite(spd)) {
+    nav.spdSm = nav.spdSm == null ? spd : nav.spdSm * 0.7 + spd * 0.3;
+    $('gSpeed').textContent = Math.max(0, Math.round(nav.spdSm)) + ' km/h';
+  }
+  const remDist = Math.max(0, nav.total - d);
+  const remTime = (nav.totalDur > 0 && nav.total > 0) ? nav.totalDur * (remDist / nav.total) : 0;
+  if (nav.dest) $('gDest').textContent = '목적지: ' + nav.dest.name + ' · ' + MODE_LABEL[nav.mode] + ' · ' + fmtEta(remTime);
   // 다음 maneuver 찾기
   while (nav.stepIdx < nav.targets.length && nav.targets[nav.stepIdx].cumDist < d + 8) {
     // 이미 지난 지점인데 안내하지 않은 경우 스킵 (조기/누락 방지)
@@ -1579,6 +1616,7 @@ async function rerouteFromHere(lat, lng) {
     for (let i = 1; i < nav.points.length; i++) nav.cum.push(nav.cum[i - 1] + haversineM(nav.points[i - 1], nav.points[i]));
     nav.total = nav.cum[nav.cum.length - 1];
     nav.targets = route.targets; nav.stepIdx = 0; nav.announced = {}; nav.offCount = 0;
+    nav.totalDur = route.duration || 0;
     speak('경로를 다시 찾았습니다.');
   } catch (e) { $('gDist').textContent = '재탐색 실패'; }
   rerouting = false;
