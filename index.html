@@ -7,6 +7,7 @@
 <title>음성 길찾기</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 :root{
   --bg:#121212;--panel:#1e1e1e;--panel2:#2b2b2b;--line:#3a3a3a;
@@ -234,7 +235,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
       <div id="placeList"></div>
       <div class="inrow">
         <input id="placeName" placeholder="이름 (예: 우리집)">
-        <input id="placeAddr" placeholder="주소 (예: 구일로 4길 65)">
+        <input id="placeAddr" placeholder="주소 (예: 세종대로 110)">
         <button id="placeAdd">추가</button>
       </div>
       <div class="hint">주소를 입력하면 좌표로 변환해 저장합니다. 명령에서 "우리집에서 회사까지 버스로" 처럼 쓸 수 있어요.</div>
