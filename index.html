@@ -999,6 +999,31 @@ function parseKakaoBike(data) {
         duration: +p.totalTime || +p.duration || 0 };
     }
   } catch (e) {}
+  // 시도 4: route.legs[].steps[] (Mobility 도보/자전거 스타일)
+  try {
+    const route = data.route;
+    if (route && Array.isArray(route.legs) && route.legs.length) {
+      const pts = [];
+      for (const leg of route.legs) {
+        const steps = leg.steps || leg.roads || [];
+        for (const st of steps) {
+          const v = st.vertexes || [];
+          if (v.length >= 4) {
+            for (let i = 0; i + 1 < v.length; i += 2) pts.push([v[i + 1], v[i]]);
+            continue;
+          }
+          const p = st.path || st.coordinates || st.lineString || [];
+          for (const c of p) if (c && c.length >= 2) pts.push([c[1], c[0]]);
+        }
+      }
+      if (pts.length >= 2) {
+        const p = route.properties || {};
+        return { points: pts,
+          distance: +p.totalDistance || +p.distance || 0,
+          duration: +p.totalTime || +p.duration || 0 };
+      }
+    }
+  } catch (e) {}
   // 파싱 실패: 응답 구조를 에러에 담아 디버깅
   let dbg = data && typeof data === 'object' ? Object.keys(data).join(',') : typeof data;
   try {
@@ -1009,6 +1034,16 @@ function parseKakaoBike(data) {
         const v = data.route[k];
         if (Array.isArray(v)) dbg += '|' + k + '[arr:' + v.length + ']';
         else if (v && typeof v === 'object') dbg += '|' + k + '{' + Object.keys(v).join(',') + '}';
+      }
+      const leg0 = data.route.legs && data.route.legs[0];
+      if (leg0 && typeof leg0 === 'object') {
+        dbg += '|leg0:' + Object.keys(leg0).join(',');
+        for (const sk of ['steps', 'roads']) {
+          if (Array.isArray(leg0[sk]) && leg0[sk].length && typeof leg0[sk][0] === 'object') {
+            dbg += '|' + sk + '[0]:' + Object.keys(leg0[sk][0]).join(',');
+            break;
+          }
+        }
       }
     }
   } catch (e) {}
