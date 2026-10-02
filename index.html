@@ -993,10 +993,12 @@ function parseKakaoBike(data) {
 async function fetchKakaoBike(from, to) {
   const kkey = (localStorage.getItem('kakao_rest_key') || '').trim();
   if (!kkey) throw new Error('no-kakao-key');
-  const url = 'https://dapi.kakao.com/v2/routing/bicycle' +
+  // CORS 우회: Vercel 프록시(/api/bike) 경유 — 서버에서 KakaoAK 헤더를 붙여 호출
+  const url = '/api/bike' +
     '?start_x=' + from.lng + '&start_y=' + from.lat +
-    '&end_x=' + to.lng + '&end_y=' + to.lat;
-  const res = await fetch(url, { headers: { 'Authorization': 'KakaoAK ' + kkey } });
+    '&end_x=' + to.lng + '&end_y=' + to.lat +
+    '&key=' + encodeURIComponent(kkey);
+  const res = await fetch(url);
   if (!res.ok) throw new Error('kakao-bike-' + res.status);
   const parsed = parseKakaoBike(await res.json());
   if (!parsed) throw new Error('kakao-bike-parse');
