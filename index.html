@@ -1205,6 +1205,26 @@ async function rerouteFromHere(lat, lng) {
 let headingDeg = null;
 let lastGpsForHeading = null;
 let followWatchId = null;
+/* 화면 표시용 방향: 센서 흔들림 평활화 + 0°/360° 경계 처리.
+   - 데드밴드 2.5°: 손떨림 수준의 미세 변화 무시
+   - 지수 평활 0.35: 급격한 튐 완화 (실제 회전은 빠르게 추적)
+   - 연속 각도(contRots): 359°→1°처럼 경계를 넘을 때 CSS transition이
+     358°를 거꾸로 도는(빙글빙글) 현상 방지 */
+let viewHeading = null;
+const contRots = {};
+function smoothViewHeading(h) {
+  if (viewHeading == null) { viewHeading = h; return h; }
+  const d = ((h - viewHeading + 540) % 360) - 180;
+  if (Math.abs(d) < 2.5) return viewHeading;
+  viewHeading = (viewHeading + d * 0.35 + 360) % 360;
+  return viewHeading;
+}
+function setContRot(el, key, target) {
+  if (contRots[key] == null) contRots[key] = target;
+  const d = ((target - contRots[key] + 540) % 360) - 180;
+  contRots[key] += d;
+  el.style.transform = 'rotate(' + contRots[key] + 'deg)';
+}
 function syncFollowUI() {
   $('compass').classList.toggle('on', state.follow);
   $('locBtn').classList.toggle('active', state.follow);
@@ -1239,27 +1259,30 @@ function resetMapLayout() {
   if (state.adapter) state.adapter.relayout();
 }
 /* 센서 방향 업데이트 시: 회전만 적용 (리사이즈/relayout 없음) */
-function applyMapRotation() {
+function applyMapRotation(vh) {
   const el = $('map');
-  if (state.follow && headingDeg != null) {
-    el.style.transform = 'rotate(' + (-headingDeg) + 'deg)';
+  const h = (vh != null ? vh : viewHeading);
+  if (state.follow && h != null) {
+    setContRot(el, 'map', -h);
   } else {
     el.style.transform = '';
   }
 }
 function refreshCone() {
   if (!state.adapter) return;
-  if (state.follow && headingDeg != null && state.myLoc) {
-    state.adapter.showCone(state.myLoc.lat, state.myLoc.lng, headingDeg);
+  const vh = viewHeading != null ? viewHeading : headingDeg;
+  if (state.follow && vh != null && state.myLoc) {
+    state.adapter.showCone(state.myLoc.lat, state.myLoc.lng, vh);
   } else {
     state.adapter.hideCone();
   }
 }
 function updateHeading() {
   if (headingDeg == null) return;
-  $('cdeg').textContent = Math.round(headingDeg) + '°';
-  $('cdial').style.transform = 'rotate(' + (-headingDeg) + 'deg)';
-  applyMapRotation();
+  const vh = smoothViewHeading(headingDeg);
+  $('cdeg').textContent = Math.round(vh) + '°';
+  setContRot($('cdial'), 'dial', -vh);
+  applyMapRotation(vh);
   refreshCone();
 }
 /* 25m 이상 벗어났을 때만 부드럽게 따라가기 (매번 panTo하면 덜컹거림) */
@@ -1305,13 +1328,19 @@ async function enterFollow() {
   refreshCone();
   toast('현위치를 따라갑니다');
 }
-function exitFollow() {
+function recenterToMe() {
+  if (state.myLoc && state.adapter) state.adapter.panTo(state.myLoc.lat, state.myLoc.lng);
+}
+function exitFollow(recenter) {
   if (!state.follow) return;
   state.follow = false;
   clearFollowWatch();
   resetMapLayout();
   syncFollowUI();
   refreshCone();
+  /* 버튼으로 종료한 경우: 따라가기 중 25m 단위로 따라와서 중심이 뒤처져 있을 수 있으니 현위치로 맞춤.
+     지도 드래그로 종료한 경우는 사용자가 본 곳을 유지해야 하므로 맞추지 않음 */
+  if (recenter) recenterToMe();
 }
 window.addEventListener('deviceorientation', e => {
   let h = null;
@@ -1422,8 +1451,8 @@ async function init() {
   };
   syncInputClear();
   $('clearBtn').onclick = clearAll;
-  $('compass').onclick = () => exitFollow(); // 탭: 따라가기 종료 → 북쪽 고정 자유 지도로
-  $('locBtn').onclick = () => { if (state.follow) exitFollow(); else enterFollow(); };
+  $('compass').onclick = () => exitFollow(true); // 탭: 따라가기 종료 → 북쪽 고정 + 현위치로
+  $('locBtn').onclick = () => { if (state.follow) exitFollow(true); else enterFollow(); };
   $('setBtn').onclick = openSettings;
   $('setClose').onclick = closeSettings;
   $('settingsModal').addEventListener('click', e => { if (e.target.id === 'settingsModal') closeSettings(); });
