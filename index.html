@@ -256,7 +256,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
           <button class="chip" data-v="safety">자전거도로 우선</button>
         </div>
       </div>
-      <div class="hint">자동차 "추천"은 실시간 교통을 반영한 가장 빠른 길이에요. 자전거 "자전거도로 우선"은 자전거도로를 우선으로 안내하며, 실패하면 기본 경로로 계산합니다.</div>
+      <div class="hint">자동차 "추천"은 실시간 교통을 반영한 가장 빠른 길이에요. 자전거는 카카오 REST API 키가 있으면 카카오 자전거도로 DB로 먼저 계산하고, 없으면 "자전거도로 우선" 설정 시 무료 엔진(BRouter)으로 계산합니다.</div>
     </div>
     <div class="msec">
       <h4>저장 장소 (우리집 / 회사 등)</h4>
@@ -275,6 +275,14 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
         <button id="tmapSave">저장</button>
       </div>
       <div class="hint">기본 내장 키로 동작 중이라 별도 입력 없이 바로 쓸 수 있어요. 자기 키를 쓰고 싶으면 여기에 입력하세요. 비우면 내장 기본 키로 돌아갑니다. 키가 없거나 연결에 실패하면 공개 서버(OSM)로 계산합니다.</div>
+    </div>
+    <div class="msec">
+      <h4>자전거 경로 (카카오)</h4>
+      <div class="inrow">
+        <input id="kakaoRestKey" placeholder="카카오 REST API 키" autocomplete="off">
+        <button id="kakaoRestSave">저장</button>
+      </div>
+      <div class="hint">카카오 자전거도로 DB로 경로를 계산해요. 카카오 개발자 콘솔(내 애플리케이션 → 앱 키)의 "REST API 키"를 입력하세요. 키가 없으면 무료 엔진(BRouter)으로 계산합니다.</div>
     </div>
     <button class="mclose" id="setClose">닫기</button>
   </div>
@@ -875,11 +883,20 @@ async function fetchRoute(from, to, mode) {
     try { return await fetchCarHybrid(from, to, tkey, getRoutePref('car')); }
     catch (e) { /* 폴백: 아래 OSRM */ }
   }
-  // 자전거: 설정에서 최단거리/자전거도로 우선 선택 시 BRouter 사용, 실패하면 OSRM 폴백
+  // 자전거: 카카오(자전거도로 DB) → BRouter(설정 프로필) → OSRM 순으로 시도
+  // ('최단거리' 설정 시에는 BRouter 최단거리를 먼저 존중하고 카카오를 차선으로)
   if (mode === 'bike') {
     const bp = getRoutePref('bike');
+    if (bp !== 'shortest') {
+      try { return await fetchKakaoBike(from, to); }
+      catch (e) { /* 키 없음/실패 → 아래 BRouter */ }
+    }
     if (bp === 'shortest' || bp === 'safety') {
       try { return await fetchBRouterBike(from, to, bp); }
+      catch (e) { /* 폴백: 아래 공개 서버 */ }
+    }
+    if (bp === 'shortest') {
+      try { return await fetchKakaoBike(from, to); }
       catch (e) { /* 폴백: 아래 공개 서버 */ }
     }
   }
@@ -934,6 +951,66 @@ function synthBikeSteps(points) {
     maneuver: { type: m.type, modifier: m.modifier },
     name: ''
   }));
+}
+/* ================= 카카오 자전거 경로 (비공식 /v2/routing/bicycle) ================= */
+// 카카오 자전거도로 DB 사용. 비공식 엔드포인트라 실패하면 BRouter로 폴백.
+// 응답 형식은 도보 API(/v2/routing/walk)와 동일한 계열로 가정하고 방어적으로 파싱.
+function parseKakaoBike(data) {
+  // 시도 1: Mobility 스타일 (routes[].sections[].roads[].vertexes = [x,y,x,y...])
+  try {
+    const r = data.routes && data.routes[0];
+    if (r) {
+      const pts = [];
+      for (const s of (r.sections || [])) {
+        for (const road of (s.roads || [])) {
+          const v = road.vertexes || [];
+          for (let i = 0; i + 1 < v.length; i += 2) pts.push([v[i + 1], v[i]]);
+        }
+      }
+      if (pts.length >= 2) {
+        const sum = r.summary || {};
+        return { points: pts, distance: +sum.distance || 0, duration: +sum.duration || 0 };
+      }
+    }
+  } catch (e) {}
+  // 시도 2: GeoJSON 스타일 (features[].geometry.coordinates = [[경도,위도],...])
+  try {
+    const feats = data.features || [];
+    const pts = [];
+    for (const f of feats) {
+      const coords = (f.geometry && f.geometry.coordinates) || [];
+      for (const c of coords) if (c && c.length >= 2) pts.push([c[1], c[0]]);
+    }
+    if (pts.length >= 2) {
+      const p = (feats[0] && feats[0].properties) || {};
+      return { points: pts,
+        distance: +p.totalDistance || +p.distance || 0,
+        duration: +p.totalTime || +p.duration || 0 };
+    }
+  } catch (e) {}
+  return null;
+}
+async function fetchKakaoBike(from, to) {
+  const kkey = (localStorage.getItem('kakao_rest_key') || '').trim();
+  if (!kkey) throw new Error('no-kakao-key');
+  const url = 'https://dapi.kakao.com/v2/routing/bicycle' +
+    '?start_x=' + from.lng + '&start_y=' + from.lat +
+    '&end_x=' + to.lng + '&end_y=' + to.lat;
+  const res = await fetch(url, { headers: { 'Authorization': 'KakaoAK ' + kkey } });
+  if (!res.ok) throw new Error('kakao-bike-' + res.status);
+  const parsed = parseKakaoBike(await res.json());
+  if (!parsed) throw new Error('kakao-bike-parse');
+  let { points, distance, duration } = parsed;
+  if (!(distance > 0)) {
+    distance = 0;
+    for (let i = 1; i < points.length; i++)
+      distance += haversineM({ lat: points[i-1][0], lng: points[i-1][1] }, { lat: points[i][0], lng: points[i][1] });
+  }
+  if (!(duration > 0)) duration = distance / 4.1667; // 15km/h 환산
+  const steps = synthBikeSteps(points);
+  let cum = 0;
+  const targets = steps.map(s => { const t = { cumDist: cum, step: s }; cum += (s.distance || 0); return t; });
+  return { points, distance, duration, steps, targets, total: cum, via: 'kakao-bike' };
 }
 async function fetchBRouterBike(from, to, profile) {
   const url = 'https://brouter.de/brouter?lonlats=' + from.lng + ',' + from.lat + '|' + to.lng + ',' + to.lat +
@@ -1955,6 +2032,20 @@ async function init() {
       toast('TMap 연결 성공! 도보 경로는 TMap으로 계산됩니다.');
     } catch (e) {
       toast('TMap 연결 실패(' + (e.message || '오류') + '). 키와 상품 구독을 확인해 주세요.');
+    }
+  };
+  $('kakaoRestKey').value = localStorage.getItem('kakao_rest_key') || '';
+  $('kakaoRestSave').onclick = async () => {
+    const v = $('kakaoRestKey').value.trim();
+    if (!v) { localStorage.removeItem('kakao_rest_key'); toast('카카오 자전거 키를 지웠습니다. 무료 엔진으로 계산됩니다.'); return; }
+    localStorage.setItem('kakao_rest_key', v);
+    toast('연결 테스트 중…');
+    try {
+      // 서울시청→광화문 짧은 구간으로 키 유효성 테스트
+      await fetchKakaoBike({ lat: 37.5663, lng: 126.9779 }, { lat: 37.5759, lng: 126.9769 });
+      toast('카카오 연결 성공! 자전거 경로는 카카오 자전거도로 DB로 계산됩니다.');
+    } catch (e) {
+      toast('카카오 연결 실패(' + (e.message || '오류') + '). REST API 키를 확인해 주세요.');
     }
   };
   $('gStop').onclick = () => stopNavigation();
