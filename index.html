@@ -18,7 +18,7 @@
 html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
   font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR",sans-serif;
   overscroll-behavior:none}
-#map{position:fixed;inset:0;z-index:0;background:#0d0d0d;touch-action:none;transition:transform .25s linear}
+#map{position:fixed;inset:0;z-index:0;background:#0d0d0d;touch-action:none}
 /* 따라가기 모드에서는 진행 방향이 위로 오도록 회전. 카카오 지도는 래스터 타일이라
    글씨도 함께 돌아감 (네이버처럼 글씨만 고정하려면 벡터 지도가 필요) */
 .leaflet-container{background:#0d0d0d;font-family:inherit}
@@ -356,6 +356,7 @@ class KakaoAdapter {
     return true;
   }
   setCenter(lat, lng) { this.map.setCenter(new kakao.maps.LatLng(lat, lng)); }
+  getCenter() { const c = this.map.getCenter(); return { lat: c.getLat(), lng: c.getLng() }; }
   panTo(lat, lng) { try { this.map.panTo(new kakao.maps.LatLng(lat, lng)); } catch (e) { this.setCenter(lat, lng); } }
   addMarker(lat, lng, opts) {
     opts = opts || {};
@@ -498,7 +499,8 @@ class LeafletAdapter {
     setTimeout(() => { try { this.map.invalidateSize(); } catch (e) {} }, 300);
     return true;
   }
-  setCenter(lat, lng) { this.map.setView([lat, lng], 15); }
+  setCenter(lat, lng) { this.map.setView([lat, lng], this.map.getZoom()); }
+  getCenter() { const c = this.map.getCenter(); return { lat: c.lat, lng: c.lng }; }
   panTo(lat, lng) { try { this.map.panTo([lat, lng], { animate: true }); } catch (e) { this.map.panTo([lat, lng]); } }
   addMarker(lat, lng, opts) {
     opts = opts || {};
@@ -713,12 +715,15 @@ function renderHistory() {
 
 /* ================= 경로 초기화 ================= */
 function clearAll() {
+  const wasNav = nav.active;
   if (nav.active) stopNavigation(true);
   state.adapter.clearMarkers();
   state.adapter.clearRoute();
   closeSheet();
   state.lastRoute = null;
   $('clearBtn').classList.remove('on');
+  /* 길안내 중 취소한 경우: 따라가기 중심이 최대 25m 뒤처져 있을 수 있으니 현위치로 맞춤 */
+  if (wasNav) recenterToMe();
   toast('경로를 지웠어요');
 }
 function resolveAlias(name) {
@@ -1307,8 +1312,11 @@ function startNavigation() {
   $('gTurn').textContent = '길안내를 시작합니다';
   $('gDist').textContent = 'GPS 수신 중…';
   speak('길안내를 시작합니다.');
-  // 길안내 중에는 내 위치를 따라감 (나침반 표시, 지도는 북쪽 고정)
-  state.follow = true; state.lastPanAt = null; syncFollowUI();
+  // 길안내 중에는 내 위치를 따라감 (나침반 표시, 진행 방향이 위로 오도록 지도 회전)
+  state.follow = true; state.lastPanAt = null;
+  layoutMapForFollow(); // 회전 시 모서리가 잘리지 않게 맵 div 확대 (이거 빼먹으면 첫 화면이 잘려 보임)
+  if (state.myLoc) state.adapter.setCenter(state.myLoc.lat, state.myLoc.lng);
+  syncFollowUI();
   // 화면 꺼짐 방지
   try {
     if (navigator.wakeLock) navigator.wakeLock.request('screen').then(l => { nav.wakeLock = l; }).catch(() => {});
@@ -1425,6 +1433,8 @@ let followWatchId = null;
      358°를 거꾸로 도는(빙글빙글) 현상 방지 */
 let viewHeading = null;
 const contRots = {};
+/* rAF 스로틀용: 센서 이벤트가 몰려도 지도 회전은 프레임당 1회 */
+let rotRaf = 0, pendingRotVh = null;
 function smoothViewHeading(h) {
   if (viewHeading == null) { viewHeading = h; return h; }
   const d = ((h - viewHeading + 540) % 360) - 180;
@@ -1452,24 +1462,29 @@ function followMapScale() {
   const r = Math.max(H / W, W / H);
   return Math.sqrt(1 + r * r) + 0.12;
 }
-/* 따라가기 진입/화면 크기 변경 시: 맵 div 확대 + relayout (센서 틱마다 호출 금지!) */
+/* 따라가기 진입/화면 크기 변경 시: 맵 div 확대 + relayout (센서 틱마다 호출 금지!)
+   div 크기가 바뀌면 지도 중심 픽셀이 어긋나므로, 중심을 저장했다가 relayout 후 복원한다 */
 function layoutMapForFollow() {
   const el = $('map');
+  const c = state.adapter ? state.adapter.getCenter() : null;
   const W = window.innerWidth, H = window.innerHeight;
   const k = followMapScale();
   el.style.width = (W * k) + 'px';
   el.style.height = (H * k) + 'px';
   el.style.left = ((W - W * k) / 2) + 'px';
   el.style.top = ((H - H * k) / 2) + 'px';
-  if (state.adapter) state.adapter.relayout();
+  el.style.willChange = 'transform';
+  if (state.adapter) { state.adapter.relayout(); if (c) state.adapter.setCenter(c.lat, c.lng); }
 }
-/* 따라가기 종료: 맵 div 원복 */
+/* 따라가기 종료: 맵 div 원복 (중심 복원 포함) */
 function resetMapLayout() {
   const el = $('map');
+  const c = state.adapter ? state.adapter.getCenter() : null;
   el.style.width = ''; el.style.height = '';
   el.style.left = ''; el.style.top = '';
   el.style.transform = '';
-  if (state.adapter) state.adapter.relayout();
+  el.style.willChange = '';
+  if (state.adapter) { state.adapter.relayout(); if (c) state.adapter.setCenter(c.lat, c.lng); }
 }
 /* 센서 방향 업데이트 시: 회전만 적용 (리사이즈/relayout 없음) */
 function applyMapRotation(vh) {
@@ -1495,7 +1510,15 @@ function updateHeading() {
   const vh = smoothViewHeading(headingDeg);
   $('cdeg').textContent = Math.round(vh) + '°';
   setContRot($('cdial'), 'dial', -vh);
-  applyMapRotation(vh);
+  /* 지도 회전은 rAF로 스로틀: 센서가 100Hz로 쏴도 프레임당 1회만 합성 (빠르게 돌릴 때 잔상/떨림 방지) */
+  pendingRotVh = vh;
+  if (!rotRaf) {
+    rotRaf = requestAnimationFrame(() => {
+      rotRaf = 0;
+      const v = pendingRotVh; pendingRotVh = null;
+      applyMapRotation(v);
+    });
+  }
   refreshCone();
 }
 /* 25m 이상 벗어났을 때만 부드럽게 따라가기 (매번 panTo하면 덜컹거림) */
