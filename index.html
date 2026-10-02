@@ -1285,7 +1285,7 @@ function selectBikeOption(idx, from, to, opts) {
 async function loadBikeOptions(from, to, opts) {
   toast('다른 경로 찾는 중…');
   const options = await fetchBikeOptions(from, to).catch(() => []);
-  if (options.length >= 2) {
+  if (options.length >= 1) {
     state.routeOptions = options;
     // 설정의 자전거 기본 경로를 기본 선택
     const pref = getRoutePref('bike');
@@ -1341,7 +1341,9 @@ function showSingleRoute(from, to, mode, route, opts) {
       extraInfo = '<div class="hint">🔥 예상 소모 약 ' + Math.round(route.distance * 0.05) + 'kcal</div>';
     }
     // 경로 옵션 선택 UI (자동차: 추천/최단거리/무료우선, 자전거: 추천/최단거리/자전거도로 우선)
-    const routeOpts = ((mode === 'car' || mode === 'bike') && state.routeOptions && state.routeOptions.length >= 2)
+    const optMin = mode === 'bike' ? 1 : 2;
+    const hasOpts = (mode === 'car' || mode === 'bike') && state.routeOptions && state.routeOptions.length >= optMin;
+    const routeOpts = hasOpts
       ? '<div class="ropts">' + state.routeOptions.map((o, i) =>
           '<button class="ropt' + (i === (state.routeOptIdx || 0) ? ' on' : '') + '" data-i="' + i + '">' +
           '<b>' + o.optLabel + '</b><span>' + fmtTime(o.duration) + ' · ' + fmtDist(o.distance) + '</span></button>'
@@ -1349,7 +1351,7 @@ function showSingleRoute(from, to, mode, route, opts) {
       : '';
     // "다른 경로 보기" 버튼 (옵션 미표시 상태에서만)
     const tkey = (localStorage.getItem('tmap_key') || TMAP_DEFAULT_KEY || '').trim();
-    const noOpts = !(state.routeOptions && state.routeOptions.length >= 2);
+    const noOpts = !hasOpts;
     const altBtn = noOpts && ((mode === 'car' && tkey) || mode === 'bike')
       ? '<button class="btn ghost" id="altRoutes" data-kind="' + mode + '" style="width:100%;margin-top:10px">다른 경로 보기 (' +
         (mode === 'bike' ? '최단거리 · 자전거도로 우선' : '최단거리 · 무료우선') + ')</button>'
