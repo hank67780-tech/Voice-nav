@@ -111,6 +111,12 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 .chip{padding:8px 14px;border-radius:18px;border:1px solid var(--line);background:var(--panel2);
   color:var(--muted);font-size:14px;cursor:pointer}
 .chip.on{background:var(--accent);border-color:var(--accent);color:#1a1a1a;font-weight:700}
+.ropts{display:flex;gap:8px;margin:10px 0}
+.ropt{flex:1;padding:8px 6px;border-radius:12px;border:1px solid var(--line);background:var(--panel2);
+  color:var(--muted);font-size:13px;cursor:pointer;display:flex;flex-direction:column;gap:2px;align-items:center}
+.ropt b{font-size:14px}
+.ropt.on{border-color:var(--accent);background:rgba(255,159,10,.12);color:var(--text)}
+.ropt.on b{color:var(--accent)}
 .err{color:var(--red);font-size:15px;line-height:1.6}
 .hint{font-size:13px;color:var(--muted);line-height:1.6;margin-top:8px}
 
@@ -266,6 +272,8 @@ const state = {
   lastPanAt: null,
   markers: [],            // adapter-agnostic handles kept by adapter
   lastRoute: null,        // {from,to,mode,points,distance,duration,steps}
+  routeOptions: null,     // 자동차 경로 옵션들 (추천/최단거리/무료우선)
+  routeOptIdx: 0,         // 선택된 옵션 인덱스
   savedPlaces: {},        // name -> {lat,lng,name}
   mapProvider: 'kakao',
 };
@@ -872,10 +880,10 @@ function findDropoff(to) {
 }
 
 /* 자동차 하이브리드: 차량 경로 종점(가장 가까운 도로)에서 목적지까지 도보 연결 */
-async function fetchCarHybrid(from, to, key) {
+async function fetchCarHybrid(from, to, key, searchOption) {
   const drop = findDropoff(to);
   const carDest = drop ? { lat: drop.lat, lng: drop.lng, name: drop.label } : to;
-  const car = await fetchTmapCar(from, carDest, key); // 실패 시 throw → 호출자가 OSRM 폴백
+  const car = await fetchTmapCar(from, carDest, key, searchOption); // 실패 시 throw → 호출자가 OSRM 폴백
   const end = car.points[car.points.length - 1];
   const endPt = { lat: end[0], lng: end[1] };
   const gap = haversineM(endPt, to);
@@ -900,6 +908,23 @@ async function fetchCarHybrid(from, to, key) {
     targets: car.targets.concat(wTargets),
     total: offset + w.total
   };
+}
+
+/* 자동차 경로 옵션: 추천/최단거리/무료우선을 병렬로 조회 (TMap searchOption: 0 추천, 2 최단, 1 무료우선) */
+const CAR_ROUTE_OPTIONS = [
+  { opt: '0', label: '추천' },
+  { opt: '2', label: '최단거리' },
+  { opt: '1', label: '무료우선' }
+];
+async function fetchCarOptions(from, to, key) {
+  const settled = await Promise.allSettled(CAR_ROUTE_OPTIONS.map(o => fetchCarHybrid(from, to, key, o.opt)));
+  const out = [];
+  settled.forEach((r, i) => {
+    if (r.status === 'fulfilled' && r.value && r.value.points && r.value.points.length > 1) {
+      out.push(Object.assign({ optLabel: CAR_ROUTE_OPTIONS[i].label }, r.value));
+    }
+  });
+  return out;
 }
 
 /* 교통 정체도 색상 (TMap traffic 레벨 기준): 0 정보없음/1 원활/2 서행/3 정체/4 극심정체 */
@@ -963,7 +988,7 @@ function routeArrowPoints(points) {
 }
 
 /* TMap 자동차 경로안내 (실시간 교통 반영) */
-async function fetchTmapCar(from, to, key) {
+async function fetchTmapCar(from, to, key, searchOption) {
   const r = await fetch('https://apis.openapi.sk.com/tmap/routes?version=1&format=json', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'appKey': key },
@@ -971,7 +996,7 @@ async function fetchTmapCar(from, to, key) {
       startX: String(from.lng), startY: String(from.lat),
       endX: String(to.lng), endY: String(to.lat),
       reqCoordType: 'WGS84GEO', resCoordType: 'WGS84GEO',
-      searchOption: '0', trafficInfo: 'Y'
+      searchOption: searchOption || '0', trafficInfo: 'Y'
     })
   });
   if (!r.ok) throw new Error('tmap-car-' + r.status);
@@ -1099,7 +1124,34 @@ async function handleCommand(text) {
 async function showRoute(from, to, mode, opts) {
   opts = opts || {};
   if (!opts.quiet) sheetLoading('경로 계산 중…');
+  const tkey = (localStorage.getItem('tmap_key') || TMAP_DEFAULT_KEY || '').trim();
+  // 자동차: 추천/최단거리/무료우선 3개 경로를 병렬 조회 후 선택 UI 제공
+  if (mode === 'car' && tkey) {
+    const options = await fetchCarOptions(from, to, tkey).catch(() => []);
+    if (options.length >= 2) {
+      state.routeOptions = options;
+      selectCarOption(0, from, to, opts);
+      return options[0];
+    }
+    if (options.length === 1) {
+      state.routeOptions = null;
+      return showSingleRoute(from, to, mode, options[0], opts);
+    }
+    // 전부 실패 → 아래 기존 폴백 (TMap 단일 + OSRM)
+  }
+  state.routeOptions = null;
   const route = await fetchRoute(from, to, mode);
+  return showSingleRoute(from, to, mode, route, opts);
+}
+/* 자동차 경로 옵션 선택: 해당 옵션으로 지도+시트 갱신 */
+function selectCarOption(idx, from, to, opts) {
+  state.routeOptIdx = idx;
+  const opt = state.routeOptions[idx];
+  showSingleRoute(from, to, 'car', opt, opts || {});
+  document.querySelectorAll('#sheet .ropt').forEach(b => b.classList.toggle('on', +b.dataset.i === idx));
+}
+function showSingleRoute(from, to, mode, route, opts) {
+  opts = opts || {};
   const hybrid = !!(route.walkPoints && route.walkPoints.length > 1);
   const modeLabel = hybrid ? '자동차 + 도보' : MODE_LABEL[mode];
   state.lastRoute = { from, to, mode, points: route.points, distance: route.distance, duration: route.duration, steps: route.steps, targets: route.targets, total: route.total, walkPoints: route.walkPoints || null };
@@ -1125,8 +1177,16 @@ async function showRoute(from, to, mode, opts) {
     } else if (mode === 'walk' && !hybrid && route.distance > 0) {
       extraInfo = '<div class="hint">🔥 예상 소모 약 ' + Math.round(route.distance * 0.05) + 'kcal</div>';
     }
+    // 자동차 경로 옵션 선택 UI (추천/최단거리/무료우선)
+    const routeOpts = (mode === 'car' && state.routeOptions && state.routeOptions.length >= 2)
+      ? '<div class="ropts">' + state.routeOptions.map((o, i) =>
+          '<button class="ropt' + (i === (state.routeOptIdx || 0) ? ' on' : '') + '" data-i="' + i + '">' +
+          '<b>' + o.optLabel + '</b><span>' + fmtTime(o.duration) + ' · ' + fmtDist(o.distance) + '</span></button>'
+        ).join('') + '</div>'
+      : '';
     openSheet(
       '<h3>' + from.name + ' → ' + to.name + '</h3>' +
+      routeOpts +
       '<div class="meta"><span>거리 <b>' + fmtDist(route.distance) + '</b></span>' +
       '<span>예상 <b>' + fmtTime(route.duration) + '</b></span>' +
       '<span>' + modeLabel + '</span></div>' +
@@ -1141,6 +1201,9 @@ async function showRoute(from, to, mode, opts) {
     );
     document.querySelectorAll('#sheet .chip').forEach(c => {
       c.onclick = () => { const m = c.dataset.mode; closeSheet(); rerouteWithMode(m); };
+    });
+    document.querySelectorAll('#sheet .ropt').forEach(b => {
+      b.onclick = () => selectCarOption(+b.dataset.i, from, to, opts);
     });
     $('navStart').onclick = startNavigation;
     speak(from.name + '에서 ' + to.name + '까지 ' + modeLabel + ' 경로입니다. ' +
