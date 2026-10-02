@@ -1024,29 +1024,24 @@ function parseKakaoBike(data) {
       }
     }
   } catch (e) {}
-  // 파싱 실패: 응답 구조를 에러에 담아 디버깅
-  let dbg = data && typeof data === 'object' ? Object.keys(data).join(',') : typeof data;
+  // 파싱 실패: 응답 구조를 에러에 담아 디버깅 (핵심부터 짧게)
+  let dbg = '';
   try {
-    if (data && data.route && typeof data.route === 'object') {
-      dbg += '|route:' + Object.keys(data.route).join(',');
-      // route 안의 좌표 후보 필드 탐색
-      for (const k of Object.keys(data.route)) {
-        const v = data.route[k];
-        if (Array.isArray(v)) dbg += '|' + k + '[arr:' + v.length + ']';
-        else if (v && typeof v === 'object') dbg += '|' + k + '{' + Object.keys(v).join(',') + '}';
-      }
-      const leg0 = data.route.legs && data.route.legs[0];
-      if (leg0 && typeof leg0 === 'object') {
-        dbg += '|leg0:' + Object.keys(leg0).join(',');
-        for (const sk of ['steps', 'roads']) {
-          if (Array.isArray(leg0[sk]) && leg0[sk].length && typeof leg0[sk][0] === 'object') {
-            dbg += '|' + sk + '[0]:' + Object.keys(leg0[sk][0]).join(',');
-            break;
-          }
+    const leg0 = data && data.route && data.route.legs && data.route.legs[0];
+    if (leg0 && typeof leg0 === 'object') {
+      dbg = 'leg0:' + Object.keys(leg0).join(',');
+      for (const sk of ['steps', 'roads', 'sections', 'paths']) {
+        if (Array.isArray(leg0[sk]) && leg0[sk].length && typeof leg0[sk][0] === 'object') {
+          dbg += '|' + sk + '[0]:' + Object.keys(leg0[sk][0]).join(',');
+          break;
         }
       }
+      const props = data.route.properties;
+      if (props && typeof props === 'object') dbg += '|props:' + Object.keys(props).join(',');
+    } else {
+      dbg = 'top:' + (data && typeof data === 'object' ? Object.keys(data).join(',') : typeof data);
     }
-  } catch (e) {}
+  } catch (e) { dbg = 'dbg-err'; }
   throw new Error('kakao-bike-parse[' + dbg + ']');
 }
 async function fetchKakaoBike(from, to) {
