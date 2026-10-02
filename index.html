@@ -1388,6 +1388,11 @@ function showSingleRoute(from, to, mode, route, opts) {
       ? '<button class="btn ghost" id="altRoutes" data-kind="' + mode + '" style="width:100%;margin-top:10px">다른 경로 보기 (' +
         (mode === 'bike' ? '최단거리 · 자전거도로 우선' : '최단거리 · 무료우선') + ')</button>'
       : '';
+    // 자전거: 카카오맵 앱의 자전거 길찾기 딥링크 (카카오 자전거도로 DB 사용)
+    const kakaoBikeBtn = mode === 'bike'
+      ? '<button class="btn ghost" id="kakaoBike" style="width:100%;margin-top:10px">🚲 카카오맵 자전거길로 보기</button>' +
+        '<div class="hint">카카오 자전거도로 DB로 안내받아요 (횡단보도·자전거도로 반영)</div>'
+      : '';
     openSheet(
       '<h3>' + from.name + ' → ' + to.name + '</h3>' +
       routeOpts +
@@ -1398,6 +1403,7 @@ function showSingleRoute(from, to, mode, route, opts) {
       trafficLegend +
       extraInfo +
       altBtn +
+      kakaoBikeBtn +
       modeChips(mode) +
       '<div class="btnrow">' +
       '<button class="btn" id="navStart">길안내 시작</button>' +
@@ -1413,6 +1419,11 @@ function showSingleRoute(from, to, mode, route, opts) {
     if ($('altRoutes')) $('altRoutes').onclick = () => {
       if ($('altRoutes').dataset.kind === 'bike') loadBikeOptions(from, to, opts);
       else loadCarOptions(from, to, opts);
+    };
+    // 카카오맵 자전거 길찾기 (공식 URL 스킴 by=bicycle — 카카오 자전거도로 DB 사용)
+    if ($('kakaoBike')) $('kakaoBike').onclick = () => {
+      window.open('https://m.map.kakao.com/scheme/route?sp=' + from.lat + ',' + from.lng +
+        '&ep=' + to.lat + ',' + to.lng + '&by=bicycle', '_blank');
     };
     $('navStart').onclick = startNavigation;
     // 하단 시트에 경로(특히 짧은 경로의 출발지)가 가려지지 않게 시트 절반 높이만큼 화면을 위로
