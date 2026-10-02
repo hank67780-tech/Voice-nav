@@ -72,6 +72,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 
 /* 내 위치 방향 콘 (지도 대신 마커가 회전) */
 .ucone{width:72px;height:72px;pointer-events:none}
+.rarrow{width:18px;height:18px;pointer-events:none}
 .ucone svg{display:block}
 .uconewrap{background:none;border:none}
 
@@ -358,7 +359,7 @@ class KakaoAdapter {
     this.markers.push(m); return m;
   }
   clearMarkers() { this.markers.forEach(m => { try { m.setMap ? m.setMap(null) : m.close(); } catch (e) {} }); this.markers = []; }
-  drawRoute(points, walkPoints) {
+  drawRoute(points, walkPoints, traffic) {
     this.clearRoute();
     const seq = (this._routeSeq = (this._routeSeq || 0) + 1);
     const path = points.map(p => new kakao.maps.LatLng(p[0], p[1]));
@@ -370,8 +371,25 @@ class KakaoAdapter {
       if (seq !== this._routeSeq) return; // 그 사이 새 경로가 그려지면 무시
       this.casing = new kakao.maps.Polyline({ path, strokeWeight: 11, strokeColor: '#ffffff', strokeOpacity: 0.92, strokeStyle: 'solid' });
       this.casing.setMap(this.map);
-      this.polyline = new kakao.maps.Polyline({ path, strokeWeight: 6, strokeColor: '#ff9f0a', strokeOpacity: 1, strokeStyle: 'solid' });
-      this.polyline.setMap(this.map);
+      // 교통 정체도별 색상 구간 (정보가 없으면 전체 주황)
+      this.trafficLines = [];
+      for (const run of groupTrafficRuns(points, traffic)) {
+        const rp = run.pts.map(p => new kakao.maps.LatLng(p[0], p[1]));
+        const line = new kakao.maps.Polyline({ path: rp, strokeWeight: 6, strokeColor: TRAFFIC_COLORS[run.level] || '#ff9f0a', strokeOpacity: 1, strokeStyle: 'solid' });
+        line.setMap(this.map);
+        this.trafficLines.push(line);
+      }
+      // 진행 방향 화살표 (흰색 삼각, 경로 진행 방향으로 회전)
+      this.routeArrows = [];
+      for (const a of routeArrowPoints(points)) {
+        const el = document.createElement('div');
+        el.className = 'rarrow';
+        el.innerHTML = '<svg width="18" height="18" viewBox="0 0 18 18"><path d="M9 2 L15 14 L9 11 L3 14 Z" fill="#ffffff" stroke="rgba(0,0,0,.3)" stroke-width="1"/></svg>';
+        el.style.transform = 'rotate(' + a.deg + 'deg)';
+        const ov = new kakao.maps.CustomOverlay({ position: new kakao.maps.LatLng(a.lat, a.lng), content: el, xAnchor: 0.5, yAnchor: 0.5 });
+        ov.setMap(this.map);
+        this.routeArrows.push(ov);
+      }
       if (walkPoints && walkPoints.length > 1) {
         const wpath = walkPoints.map(p => new kakao.maps.LatLng(p[0], p[1]));
         this.walkCasing = new kakao.maps.Polyline({ path: wpath, strokeWeight: 9, strokeColor: '#ffffff', strokeOpacity: 0.9, strokeStyle: 'solid' });
@@ -385,7 +403,8 @@ class KakaoAdapter {
   clearRoute() {
     this._routeSeq = (this._routeSeq || 0) + 1;
     if (this.casing) { try { this.casing.setMap(null); } catch (e) {} this.casing = null; }
-    if (this.polyline) { try { this.polyline.setMap(null); } catch (e) {} this.polyline = null; }
+    if (this.trafficLines) { for (const l of this.trafficLines) { try { l.setMap(null); } catch (e) {} } this.trafficLines = null; }
+    if (this.routeArrows) { for (const o of this.routeArrows) { try { o.setMap(null); } catch (e) {} } this.routeArrows = null; }
     if (this.walkCasing) { try { this.walkCasing.setMap(null); } catch (e) {} this.walkCasing = null; }
     if (this.walkLine) { try { this.walkLine.setMap(null); } catch (e) {} this.walkLine = null; }
   }
@@ -480,19 +499,32 @@ class LeafletAdapter {
     return m;
   }
   clearMarkers() { this.layer.clearLayers(); }
-  drawRoute(points, walkPoints) {
+  drawRoute(points, walkPoints, traffic) {
     this.clearRoute();
     this.routeCasing = L.polyline(points, { color: '#ffffff', weight: 11, opacity: 0.92 }).addTo(this.map);
-    this.routeLayer = L.polyline(points, { color: '#ff9f0a', weight: 6, opacity: 1 }).addTo(this.map);
+    this.trafficLayers = [];
+    for (const run of groupTrafficRuns(points, traffic)) {
+      this.trafficLayers.push(L.polyline(run.pts, { color: TRAFFIC_COLORS[run.level] || '#ff9f0a', weight: 6, opacity: 1 }).addTo(this.map));
+    }
+    this.routeArrowMarkers = [];
+    for (const a of routeArrowPoints(points)) {
+      this.routeArrowMarkers.push(L.marker([a.lat, a.lng], {
+        icon: L.divIcon({ className: 'uconewrap', html: '<div class="rarrow" style="transform:rotate(' + a.deg + 'deg)"><svg width="18" height="18" viewBox="0 0 18 18"><path d="M9 2 L15 14 L9 11 L3 14 Z" fill="#ffffff" stroke="rgba(0,0,0,.3)" stroke-width="1"/></svg></div>', iconSize: [18, 18], iconAnchor: [9, 9] }),
+        interactive: false, keyboard: false
+      }).addTo(this.map));
+    }
     if (walkPoints && walkPoints.length > 1) {
       this.walkCasing = L.polyline(walkPoints, { color: '#ffffff', weight: 9, opacity: 0.9 }).addTo(this.map);
       this.walkLine = L.polyline(walkPoints, { color: '#ff9f0a', weight: 5, opacity: 1, dashArray: '10, 8' }).addTo(this.map);
     }
-    this.map.fitBounds(this.routeLayer.getBounds(), { padding: [40, 40] });
+    const b = this.routeCasing.getBounds();
+    if (walkPoints && walkPoints.length > 1) b.extend(this.walkCasing.getBounds());
+    this.map.fitBounds(b, { padding: [40, 40] });
   }
   clearRoute() {
     if (this.routeCasing) { this.map.removeLayer(this.routeCasing); this.routeCasing = null; }
-    if (this.routeLayer) { this.map.removeLayer(this.routeLayer); this.routeLayer = null; }
+    if (this.trafficLayers) { for (const l of this.trafficLayers) this.map.removeLayer(l); this.trafficLayers = null; }
+    if (this.routeArrowMarkers) { for (const m of this.routeArrowMarkers) this.map.removeLayer(m); this.routeArrowMarkers = null; }
     if (this.walkCasing) { this.map.removeLayer(this.walkCasing); this.walkCasing = null; }
     if (this.walkLine) { this.map.removeLayer(this.walkLine); this.walkLine = null; }
   }
@@ -539,6 +571,16 @@ async function geocode(query, near) {
   const q = query.trim();
   if (state.kakaoReady && state.adapter instanceof KakaoAdapter) {
     try {
+      // 역 이름은 정확 매칭 우선 (거리순 정렬 때문에 엉뚱한 역이 먼저 잡히는 것 방지)
+      if (/역$/.test(q)) {
+        const list = await state.adapter.searchKeywordList(q, near, 10);
+        const exact = pickExactStation(q, list);
+        if (exact) return exact;
+        // 근처 3km에 정확 매칭이 없으면 전국 범위에서 재시도
+        const list2 = await state.adapter.searchKeywordList(q, null, 10);
+        const exact2 = pickExactStation(q, list2);
+        if (exact2) return exact2;
+      }
       const k = await state.adapter.searchKeyword(q, near);
       if (k) return k;
       const a = await state.adapter.searchAddress(q);
@@ -559,6 +601,14 @@ function isSubwayStation(place) {
 function stationBaseName(name) {
   const m = String(name || '').match(/^(.*역)/);
   return m ? m[1] : name;
+}
+/* 역 이름 정확 매칭: "영등포역" 검색 시 근처 "영등포시장역"이 먼저 잡히는 문제 방지.
+   카카오는 거리순으로 정렬해서 주기 때문에, 정확히 일치하는 역명을 우선 선택한다 */
+function pickExactStation(q, list) {
+  if (!list || !list.length) return null;
+  const norm = s => stationBaseName(s || '').replace(/\s+/g, '');
+  const nq = norm(q);
+  return list.find(p => norm(p.name) === nq) || list.find(p => norm(p.name).startsWith(nq)) || null;
 }
 /* TMap POI 통합검색 (지하철 출구 등 한국 POI 데이터용) */
 async function tmapPoiSearch(keyword, center) {
@@ -838,6 +888,8 @@ async function fetchCarHybrid(from, to, key) {
   return {
     points: car.points.concat(w.points),
     carPoints: car.points,
+    carTraffic: car.traffic,
+    taxiFare: car.taxiFare, tollFare: car.tollFare,
     walkPoints: w.points,
     carDistance: car.distance, carDuration: car.duration,
     walkDistance: w.distance, walkDuration: w.duration,
@@ -848,6 +900,66 @@ async function fetchCarHybrid(from, to, key) {
     targets: car.targets.concat(wTargets),
     total: offset + w.total
   };
+}
+
+/* 교통 정체도 색상 (TMap traffic 레벨 기준): 0 정보없음/1 원활/2 서행/3 정체/4 극심정체 */
+const TRAFFIC_COLORS = { 0: '#ff9f0a', 1: '#22c55e', 2: '#eab308', 3: '#ef4444', 4: '#991b1b' };
+/* 경로 좌표 + traffic 구간 → 색상별 연속 구간으로 그룹핑 (구간 경계는 1점씩 겹쳐서 끊김 없이) */
+function groupTrafficRuns(points, traffic) {
+  const n = points.length;
+  if (n < 2) return [];
+  const lv = new Array(n).fill(0);
+  if (traffic) for (const t of traffic) {
+    const a = Math.max(0, Math.min(n - 1, t.from | 0));
+    const b = Math.max(0, Math.min(n - 1, t.to | 0));
+    for (let i = a; i <= b; i++) lv[i] = t.level | 0;
+  }
+  const runs = [];
+  let s = 0;
+  for (let i = 1; i < n; i++) {
+    if (lv[i] !== lv[s]) {
+      runs.push({ level: lv[s], pts: points.slice(s, i + 1) });
+      s = i;
+    }
+  }
+  const tail = points.slice(s);
+  if (tail.length >= 2) runs.push({ level: lv[s], pts: tail });
+  // runs가 비면(2점 미만 경로) 전체를 정보없음으로
+  if (!runs.length) runs.push({ level: 0, pts: points.slice() });
+  return runs;
+}
+
+/* 두 점 사이 방위각 (0=북, 시계방향 도) */
+function bearingDeg(a, b) {
+  const r = Math.PI / 180;
+  const dLng = (b[1] - a[1]) * r;
+  const y = Math.sin(dLng) * Math.cos(b[0] * r);
+  const x = Math.cos(a[0] * r) * Math.sin(b[0] * r) - Math.sin(a[0] * r) * Math.cos(b[0] * r) * Math.cos(dLng);
+  return (Math.atan2(y, x) / r + 360) % 360;
+}
+/* 경로 진행 방향 화살표 위치: 경로 길이에 따라 간격 자동 조절 (최대 24개) */
+function routeArrowPoints(points) {
+  const arrows = [];
+  if (!points || points.length < 2) return arrows;
+  let total = 0;
+  const segs = [];
+  for (let i = 1; i < points.length; i++) {
+    const d = haversineM({ lat: points[i - 1][0], lng: points[i - 1][1] }, { lat: points[i][0], lng: points[i][1] });
+    segs.push(d); total += d;
+  }
+  if (total < 50) return arrows;
+  const step = Math.min(2000, Math.max(120, total / 24));
+  let acc = 0, nextAt = step * 0.5, count = 0;
+  for (let i = 1; i < points.length && count < 24; i++) {
+    const a = points[i - 1], b = points[i], segLen = segs[i - 1];
+    while (acc + segLen >= nextAt && count < 24) {
+      const t = segLen > 0 ? (nextAt - acc) / segLen : 0;
+      arrows.push({ lat: a[0] + (b[0] - a[0]) * t, lng: a[1] + (b[1] - a[1]) * t, deg: bearingDeg(a, b) });
+      count++; nextAt += step;
+    }
+    acc += segLen;
+  }
+  return arrows;
 }
 
 /* TMap 자동차 경로안내 (실시간 교통 반영) */
@@ -865,14 +977,30 @@ async function fetchTmapCar(from, to, key) {
   if (!r.ok) throw new Error('tmap-car-' + r.status);
   const j = await r.json();
   const feats = j.features || [];
-  let distance = 0, duration = 0;
-  const points = [], guidePts = [];
+  let distance = 0, duration = 0, taxiFare = 0, tollFare = 0;
+  const points = [], guidePts = [], traffic = [];
   for (const f of feats) {
     const p = f.properties || {}, g = f.geometry || {};
     if (p.totalDistance) distance = Math.max(distance, +p.totalDistance);
     if (p.totalTime) duration = Math.max(duration, +p.totalTime);
+    if (p.taxiFare) taxiFare = Math.max(taxiFare, +p.taxiFare);
+    if (p.totalFare) tollFare = Math.max(tollFare, +p.totalFare);
     if (g.type === 'LineString' && g.coordinates) {
+      const start = points.length;
       for (const c of g.coordinates) points.push([c[1], c[0]]);
+      /* 교통 정보: properties.traffic = [[시작idx, 끝idx, 정체도], ...]
+         (해당 LineString 좌표 기준 상대 인덱스, 정체도: 0 정보없음/1 원활/2 서행/3 정체/4 극심정체).
+         형식이 다르면 무시하고 기존 주황색으로 그린다 */
+      const tr = p.traffic;
+      if (Array.isArray(tr)) {
+        for (const t of tr) {
+          if (Array.isArray(t) && t.length >= 3 && isFinite(+t[0]) && isFinite(+t[1])) {
+            const a = Math.max(0, Math.min(points.length - 1, start + (+t[0] | 0)));
+            const b = Math.max(0, Math.min(points.length - 1, start + (+t[1] | 0)));
+            if (b > a) traffic.push({ from: a, to: b, level: (+t[2] | 0) });
+          }
+        }
+      }
     } else if (g.type === 'Point' && g.coordinates && +p.turnType !== 200) {
       guidePts.push({ lat: g.coordinates[1], lng: g.coordinates[0], p });
     }
@@ -890,7 +1018,7 @@ async function fetchTmapCar(from, to, key) {
   });
   let cum = 0;
   const targets = steps.map(s => { const t = { cumDist: cum, step: s }; cum += (s.distance || 0); return t; });
-  return { points, distance, duration, steps, targets, total: cum };
+  return { points, distance, duration, steps, targets, total: cum, traffic, taxiFare, tollFare };
 }
 
 /* ================= 하단 시트 ================= */
@@ -979,19 +1107,32 @@ async function showRoute(from, to, mode, opts) {
   state.adapter.clearRoute();
   state.adapter.addMarker(from.lat, from.lng, { label: '출발: ' + from.name });
   state.adapter.addMarker(to.lat, to.lng, { label: '도착: ' + to.name });
-  state.adapter.drawRoute(route.carPoints || route.points, route.walkPoints);
+  state.adapter.drawRoute(route.carPoints || route.points, route.walkPoints, route.carTraffic);
   $('clearBtn').classList.add('on');
   if (!opts.quiet) {
     saveHistory({ q: state.lastQuery || (from.name + '에서 ' + to.name + '까지 ' + MODE_LABEL[mode]), from: from.name, to: to.name, mode });
     const legInfo = hybrid
       ? '<div class="hint">🚗 자동차 ' + fmtDist(route.carDistance) + ' (' + fmtTime(route.carDuration) + ')' + (route.dropLabel ? ' · ' + route.dropLabel + ' 하차' : '') + ' → 🚶 도보 ' + fmtDist(route.walkDistance) + ' (' + fmtTime(route.walkDuration) + ')</div>'
       : '';
+    const trafficLegend = (mode === 'car' && route.carTraffic && route.carTraffic.length)
+      ? '<div class="hint">🟢 원활 &nbsp;🟡 서행 &nbsp;🔴 정체 &nbsp;🟤 극심정체</div>'
+      : '';
+    // 추가 정보: 자동차=택시요금/통행료(TMap 제공 시), 도보=예상 소모 칼로리(약 50kcal/km 추정치)
+    let extraInfo = '';
+    if (mode === 'car' && (route.taxiFare > 0 || route.tollFare > 0)) {
+      extraInfo = '<div class="hint">🚕 택시 약 ' + Number(route.taxiFare || 0).toLocaleString() + '원' +
+        ' · 통행료 ' + (route.tollFare > 0 ? Number(route.tollFare).toLocaleString() + '원' : '없음') + '</div>';
+    } else if (mode === 'walk' && !hybrid && route.distance > 0) {
+      extraInfo = '<div class="hint">🔥 예상 소모 약 ' + Math.round(route.distance * 0.05) + 'kcal</div>';
+    }
     openSheet(
       '<h3>' + from.name + ' → ' + to.name + '</h3>' +
       '<div class="meta"><span>거리 <b>' + fmtDist(route.distance) + '</b></span>' +
       '<span>예상 <b>' + fmtTime(route.duration) + '</b></span>' +
       '<span>' + modeLabel + '</span></div>' +
       legInfo +
+      trafficLegend +
+      extraInfo +
       modeChips(mode) +
       '<div class="btnrow">' +
       '<button class="btn" id="navStart">길안내 시작</button>' +
@@ -1185,7 +1326,7 @@ async function rerouteFromHere(lat, lng) {
     const route = await fetchRoute(from, lr.to, lr.mode);
     state.lastRoute = { from, to: lr.to, mode: lr.mode, points: route.points, distance: route.distance, duration: route.duration, steps: route.steps, targets: route.targets, total: route.total, walkPoints: route.walkPoints || null };
     state.adapter.clearRoute();
-    state.adapter.drawRoute(route.carPoints || route.points, route.walkPoints);
+    state.adapter.drawRoute(route.carPoints || route.points, route.walkPoints, route.carTraffic);
     // nav 상태 리셋
     nav.points = route.points.map(p => ({ lat: p[0], lng: p[1] }));
     nav.cum = [0];
