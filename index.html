@@ -638,15 +638,19 @@ async function tmapPoiSearch(keyword, center) {
 }
 async function nearestExit(station, ref) {
   try {
-    const q = stationBaseName(station.name) + ' 출구';
+    const base = stationBaseName(station.name);
+    const q = base + ' 출구';
     const ctr = { lat: station.lat, lng: station.lng };
+    const normBase = base.replace(/\s+/g, '');
+    // 해당 역의 출구만 사용: "영등포시장역 1번출구"처럼 이름이 비슷한 다른 역 출구가 섞이는 것 방지
+    const isOurExit = e => (e.name || '').replace(/\s+/g, '').startsWith(normBase);
     let exits = [];
     // 1) TMap POI 우선 (한국 지하철 출구 데이터가 가장 정확)
-    exits = (await tmapPoiSearch(q, ctr)).filter(e => e.name.includes('출구'));
+    exits = (await tmapPoiSearch(q, ctr)).filter(e => e.name.includes('출구') && isOurExit(e));
     // 2) 폴백: 카카오 장소 검색
     if (!exits.length && state.kakaoReady && state.adapter instanceof KakaoAdapter) {
       const list = await state.adapter.searchKeywordList(q, ctr, 15);
-      exits = (list || []).filter(e => e.name && e.name.includes('출구'));
+      exits = (list || []).filter(e => e.name && e.name.includes('출구') && isOurExit(e));
     }
     if (!exits.length) return null;
     let best = null, bestD = Infinity;
