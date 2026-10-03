@@ -1759,13 +1759,10 @@ async function routeToPoi(idx) {
   openSheet('<h3>' + dest.name + '(으)로 안내</h3>' +
     '<div class="hint">이동수단을 선택하세요</div>' +
     '<div class="btnrow" style="display:flex;gap:8px;margin-top:12px">' +
-    '<button class="btn" data-mode="walk" style="flex:1">도보</button>' +
-    '<button class="btn" data-mode="car" style="flex:1">자동차</button>' +
-    '<button class="btn" data-mode="bike" style="flex:1">자전거</button>' +
+    '<button class="btn" onclick="startPoiNavigation(\'walk\')" style="flex:1">도보</button>' +
+    '<button class="btn" onclick="startPoiNavigation(\'car\')" style="flex:1">자동차</button>' +
+    '<button class="btn" onclick="startPoiNavigation(\'bike\')" style="flex:1">자전거</button>' +
     '</div><div class="btnrow"><button class="btn ghost" onclick="closeSheet()">닫기</button></div>');
-  document.querySelectorAll('[data-mode]').forEach(el => {
-    el.addEventListener('click', () => startPoiNavigation(el.dataset.mode));
-  });
   // 음성으로 이동수단 듣기
   setTimeout(() => autoListenForMode(), 2500);
 }
@@ -1773,7 +1770,10 @@ async function routeToPoi(idx) {
 function autoListenForMode() {
   if (!state.pendingPoiDest) return;
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR || listening) return;
+  if (!SR) return;
+  // 기존 인식 중이면 중단
+  if (listening && recog) { try { recog.stop(); } catch (e) {} }
+  listening = false;
   recog = new SR();
   recog.lang = 'ko-KR'; recog.interimResults = false; recog.maxAlternatives = 1;
   const timeout = setTimeout(() => { try { recog.stop(); } catch (e) {} }, 10000);
