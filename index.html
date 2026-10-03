@@ -1695,8 +1695,39 @@ async function findNearbyPoi(cat) {
     el.addEventListener('click', () => routeToPoi(parseInt(el.dataset.idx, 10)));
   });
   const names = list.slice(0, 3).map((p, i) => (i + 1) + '번 ' + p.name).join(', ');
-  // TTS는 짧게 (마이크 탭하면 중단됨)
-  speak('근처 ' + cat.label + ' ' + list.length + '곳. ' + names);
+  // TTS로 읽어준 뒤 자동으로 번호 듣기 시작 (네비처럼)
+  speakWithCallback('근처 ' + cat.label + ' ' + list.length + '곳. ' + names + '. 번호를 말씀하세요.',
+    () => autoListenForPoi());
+}
+// TTS 완료 후 콜백
+function speakWithCallback(text, cb) {
+  try {
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'ko-KR'; u.rate = 1.0;
+    u.onend = () => { try { cb(); } catch (e) {} };
+    u.onerror = () => { try { cb(); } catch (e) {} };
+    speechSynthesis.cancel(); speechSynthesis.speak(u);
+  } catch (e) { try { cb(); } catch (e2) {} }
+}
+// POI 번호 자동 듣기 (10초)
+function autoListenForPoi() {
+  if (!state.poiList || !state.poiList.length) return;
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR || listening) return;
+  recog = new SR();
+  recog.lang = 'ko-KR'; recog.interimResults = false; recog.maxAlternatives = 1;
+  const timeout = setTimeout(() => { try { recog.stop(); } catch (e) {} }, 10000);
+  recog.onstart = () => { listening = true; $('micBtn').classList.add('listening'); };
+  recog.onend = () => { listening = false; $('micBtn').classList.remove('listening'); clearTimeout(timeout); };
+  recog.onerror = () => { listening = false; $('micBtn').classList.remove('listening'); clearTimeout(timeout); };
+  recog.onresult = e => {
+    clearTimeout(timeout);
+    const text = e.results[0][0].transcript;
+    $('cmdInput').value = text;
+    state.lastQuery = text;
+    handleCommand(text);
+  };
+  try { recog.start(); toast('번호를 말씀하세요'); } catch (e) {}
 }
 // 하위 호환: 기존 화장실 검색은 새 함수로 위임
 async function findRestrooms() {
