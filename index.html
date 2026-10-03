@@ -320,6 +320,7 @@ const state = {
   mapProvider: 'kakao',
   poiList: null,          // 근처 POI 검색 결과 (번호 선택용)
   pendingPoiDest: null,   // POI 선택 후 이동수단 대기 중 목적지
+  wantModeListen: false,  // 이동수단 음성 듣기 예약 플래그
 };
 
 /* ================= 유틸 ================= */
@@ -1763,36 +1764,42 @@ async function routeToPoi(idx) {
     '<button class="btn" onclick="startPoiNavigation(\'car\')" style="flex:1">자동차</button>' +
     '<button class="btn" onclick="startPoiNavigation(\'bike\')" style="flex:1">자전거</button>' +
     '</div><div class="btnrow"><button class="btn ghost" onclick="closeSheet()">닫기</button></div>');
-  // 음성으로 이동수단 듣기 (즉시 시작)
-  autoListenForMode();
+  // 음성으로 이동수단 듣기 (이전 인식 종료 후 시작)
+  state.wantModeListen = true;
+  setTimeout(() => { if (state.wantModeListen) autoListenForMode(); }, 1500);
 }
 // POI 이동수단 음성 듣기
 function autoListenForMode() {
-  if (!state.pendingPoiDest) return;
+  if (!state.pendingPoiDest || !state.wantModeListen) return;
+  state.wantModeListen = false;
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) { toast('음성 인식을 지원하지 않습니다'); return; }
-  // 기존 인식 중이면 중단
+  // 기존 인식 완전히 종료 대기
   try { if (recog) recog.abort(); } catch (e) {}
   listening = false;
   $('micBtn').classList.remove('listening');
-  recog = new SR();
-  recog.lang = 'ko-KR'; recog.interimResults = false; recog.maxAlternatives = 1;
-  const timeout = setTimeout(() => { try { recog.stop(); } catch (e) {} }, 12000);
-  recog.onstart = () => { listening = true; $('micBtn').classList.add('listening'); };
-  recog.onend = () => { listening = false; $('micBtn').classList.remove('listening'); clearTimeout(timeout); };
-  recog.onerror = (e) => { listening = false; $('micBtn').classList.remove('listening'); clearTimeout(timeout); };
-  recog.onresult = e => {
-    clearTimeout(timeout);
-    const text = e.results[0][0].transcript;
-    $('cmdInput').value = text;
-    handleModeSelection(text);
-  };
-  try {
-    recog.start();
-    toast('이동수단을 말씀하세요 (도보/자동차/자전거)', 3000);
-  } catch (e) {
-    toast('음성 인식 시작 실패');
-  }
+  // 잠시 대기 후 새 인식 시작 (iOS 충돌 방지)
+  setTimeout(() => {
+    if (!state.pendingPoiDest) return;
+    recog = new SR();
+    recog.lang = 'ko-KR'; recog.interimResults = false; recog.maxAlternatives = 1;
+    const timeout = setTimeout(() => { try { recog.stop(); } catch (e) {} }, 12000);
+    recog.onstart = () => { listening = true; $('micBtn').classList.add('listening'); };
+    recog.onend = () => { listening = false; $('micBtn').classList.remove('listening'); clearTimeout(timeout); };
+    recog.onerror = (e) => { listening = false; $('micBtn').classList.remove('listening'); clearTimeout(timeout); };
+    recog.onresult = e => {
+      clearTimeout(timeout);
+      const text = e.results[0][0].transcript;
+      $('cmdInput').value = text;
+      handleModeSelection(text);
+    };
+    try {
+      recog.start();
+      toast('이동수단을 말씀하세요 (도보/자동차/자전거)', 3000);
+    } catch (e) {
+      toast('음성 인식 시작 실패');
+    }
+  }, 500);
 }
 // 이동수단 선택 처리
 function handleModeSelection(text) {
@@ -1816,6 +1823,8 @@ async function startPoiNavigation(mode) {
   const dest = state.pendingPoiDest;
   if (!dest) return;
   state.pendingPoiDest = null;
+  state.wantModeListen = false;
+  try { if (recog) recog.abort(); } catch (e) {}
   closeSheet();
   busy = true;
   try {
