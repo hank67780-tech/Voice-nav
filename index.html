@@ -1695,19 +1695,24 @@ async function findNearbyPoi(cat) {
     el.addEventListener('click', () => routeToPoi(parseInt(el.dataset.idx, 10)));
   });
   const names = list.slice(0, 3).map((p, i) => (i + 1) + '번 ' + p.name).join(', ');
-  // TTS로 읽어준 뒤 자동으로 번호 듣기 시작 (네비처럼)
-  speakWithCallback('근처 ' + cat.label + ' ' + list.length + '곳. ' + names + '. 번호를 말씀하세요.',
+  // 결과는 화면에 표시, 음성은 짧게 "몇 번으로 안내할까요?"만
+  speakWithCallback('근처 ' + cat.label + ' ' + list.length + '곳 찾았어요. 몇 번으로 안내할까요?',
     () => autoListenForPoi());
 }
-// TTS 완료 후 콜백
+// TTS 완료 후 콜백 (실패해도 콜백은 실행)
 function speakWithCallback(text, cb) {
+  let called = false;
+  const done = () => { if (!called) { called = true; try { cb(); } catch (e) {} } };
   try {
     const u = new SpeechSynthesisUtterance(text);
     u.lang = 'ko-KR'; u.rate = 1.0;
-    u.onend = () => { try { cb(); } catch (e) {} };
-    u.onerror = () => { try { cb(); } catch (e) {} };
-    speechSynthesis.cancel(); speechSynthesis.speak(u);
-  } catch (e) { try { cb(); } catch (e2) {} }
+    u.onend = done;
+    u.onerror = done;
+    speechSynthesis.cancel();
+    speechSynthesis.speak(u);
+    // 안전장치: 5초 안에 안 끝나면 강제 진행
+    setTimeout(done, 5000);
+  } catch (e) { done(); }
 }
 // POI 번호 자동 듣기 (10초)
 function autoListenForPoi() {
