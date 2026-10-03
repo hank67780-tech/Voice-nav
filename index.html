@@ -163,6 +163,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 .place-row{display:flex;align-items:center;gap:8px;padding:10px 4px;border-bottom:1px solid var(--line);
   font-size:15px}
 .place-row .del{margin-left:auto;background:none;border:none;color:var(--red);font-size:16px;cursor:pointer}
+.place-row .edit{background:none;border:none;color:var(--accent);font-size:16px;cursor:pointer}
 .inrow{display:flex;gap:8px;margin-top:8px}
 .inrow input{flex:1;min-width:0;background:var(--panel2);border:1px solid var(--line);border-radius:10px;
   color:var(--text);font-size:15px;padding:11px 12px;outline:none}
@@ -271,6 +272,10 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
         <input id="placeAddr" placeholder="주소 (예: 세종대로 110)">
         <button id="placeAdd">추가</button>
       </div>
+      <div class="inrow">
+        <button id="placePickMap" class="btn ghost" style="flex:1">🗺️ 지도에서 직접 찍기</button>
+        <button id="placeUseLoc" class="btn ghost" style="flex:1">📍 현위치로 저장</button>
+      </div>
       <div class="hint">주소를 입력하면 좌표로 변환해 저장합니다. 명령에서 "우리집에서 회사까지 버스로" 처럼 쓸 수 있어요.</div>
     </div>
     <div class="msec">
@@ -321,6 +326,7 @@ const state = {
   poiList: null,          // 근처 POI 검색 결과 (번호 선택용)
   pendingPoiDest: null,   // POI 선택 후 이동수단 대기 중 목적지
   wantModeListen: false,  // 이동수단 음성 듣기 예약 플래그
+  waypoints: [],          // 경유지 [{lat,lng,name}]
 };
 
 /* ================= 유틸 ================= */
@@ -397,8 +403,9 @@ class KakaoAdapter {
             this.geocoder = new kakao.maps.services.Geocoder();
             this.markers = []; this.polyline = null; this.casing = null; this.userMarker = null;
             this.walkLine = null; this.walkCasing = null;
-            this.coneOv = null; this.coneEl = null; this._onUserDrag = null;
+            this.coneOv = null; this.coneEl = null; this._onUserDrag = null; this._onMapClick = null;
             kakao.maps.event.addListener(this.map, 'dragstart', () => { if (this._onUserDrag) this._onUserDrag(); });
+            kakao.maps.event.addListener(this.map, 'click', (e) => { if (this._onMapClick) this._onMapClick(e.latLng.getLat(), e.latLng.getLng()); });
             this._routeSeq = 0;
             resolve();
           } catch (e) { reject(e); }
@@ -511,6 +518,7 @@ class KakaoAdapter {
   }
   hideCone() { if (this.coneOv) this.coneOv.setMap(null); }
   onUserDrag(cb) { this._onUserDrag = cb; }
+  onMapClick(cb) { this._onMapClick = cb; }
   searchKeyword(q, near) {
     return new Promise(resolve => {
       const o = { size: 5 };
@@ -557,8 +565,9 @@ class LeafletAdapter {
     }).addTo(this.map);
     this.layer = L.layerGroup().addTo(this.map);
     this.routeLayer = null; this.userMarker = null;
-    this.coneMarker = null; this.coneEl = null; this._onUserDrag = null;
+    this.coneMarker = null; this.coneEl = null; this._onUserDrag = null; this._onMapClick = null;
     this.map.on('dragstart', () => { if (this._onUserDrag) this._onUserDrag(); });
+    this.map.on('click', (e) => { if (this._onMapClick) this._onMapClick(e.latlng.lat, e.latlng.lng); });
     setTimeout(() => { try { this.map.invalidateSize(); } catch (e) {} }, 300);
     return true;
   }
@@ -632,6 +641,7 @@ class LeafletAdapter {
   }
   hideCone() { if (this.coneEl) this.coneEl.style.display = 'none'; }
   onUserDrag(cb) { this._onUserDrag = cb; }
+  onMapClick(cb) { this._onMapClick = cb; }
   // Leaflet 폴백에서는 카카오 검색 불가 → null 반환, 상위에서 Nominatim 사용
   searchKeyword() { return Promise.resolve(null); }
   searchAddress() { return Promise.resolve(null); }
@@ -863,6 +873,21 @@ const POI_ORDINALS = ['첫번째', '첫 번째', '두번째', '두 번째', '세
 function parseCommand(text) {
   let t = (text || '').trim();
   if (!t) return null;
+  // 경유지 명령
+  if (/경유지\s*(추가|넣어|등록|더해|넣어줘|추가해)/.test(t)) return { addWaypoint: true, raw: text };
+  if (/경유지\s*(삭제|취소|지우기|없애|제거|지워)/.test(t)) return { clearWaypoints: true, raw: text };
+  // 저장 장소 음성 명령: "현위치 저장", "우리집으로 저장"
+  if (/현위치\s*저장/.test(t)) return { saveCurrentPlace: true, raw: text };
+  let sm;
+  if ((sm = t.match(/(.+?)\s*(으)로\s*저장(해|해줘)?$/))) {
+    const nm = sm[1].trim();
+    if (nm && !/현위치/.test(nm)) return { savePlaceAs: nm, raw: text };
+  }
+  let wm;
+  if ((wm = t.match(/(.+?)\s*경유(해서|하고)?\s*(가|가줘|가라|갈래)?$/))) {
+    const place = wm[1].trim();
+    if (place && place !== '경유지' && !/^(경유지|추가|삭제)/.test(place)) return { waypointTo: place, raw: text };
+  }
   // POI 목록에서 번호 선택 ("1번", "첫번째" 등)
   if (state.poiList && state.poiList.length) {
     let m = t.match(/(\d+)\s*번/);
@@ -1425,9 +1450,22 @@ async function handleCommand(text) {
   }
   busy = true;
   try {
+    if (parsed.addWaypoint) { await waypointAddFlow(); return; }
+    if (parsed.clearWaypoints) {
+      state.waypoints = [];
+      toast('경유지를 모두 삭제했어요.');
+      speak('경유지를 모두 삭제했어요.');
+      if (state.lastRoute) await recalcWithWaypoints();
+      return;
+    }
+    if (parsed.waypointTo) { await addWaypointByName(parsed.waypointTo); return; }
+    if (parsed.saveCurrentPlace) { await voiceSaveCurrentPlace(); return; }
+    if (parsed.savePlaceAs) { await saveCurrentAs(parsed.savePlaceAs); return; }
     if (parsed.restroom) { await findRestrooms(); return; }
     if (parsed.nearbyPoi) { await findNearbyPoi(parsed.nearbyPoi); return; }
     if (parsed.selectPoi !== undefined) { await routeToPoi(parsed.selectPoi); return; }
+    // 새 경로 검색: 기존 경유지 초기화
+    state.waypoints = [];
     sheetLoading('"' + parsed.to + '" 검색 중…');
     const near = state.myLoc || await getGPS(6000);
 
@@ -1482,8 +1520,94 @@ async function showRoute(from, to, mode, opts) {
   opts = opts || {};
   if (!opts.quiet) sheetLoading('경로 계산 중…');
   state.routeOptions = null;
-  const route = await fetchRoute(from, to, mode);
+  const route = state.waypoints.length
+    ? await fetchRouteVia(from, state.waypoints, to, mode)
+    : await fetchRoute(from, to, mode);
   return showSingleRoute(from, to, mode, route, opts);
+}
+/* ================= 경유지 ================= */
+// 한 번만 듣는 음성 인식 (경유지 장소명 등)
+function listenOnce(cb, promptText) {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { toast('음성 인식을 지원하지 않습니다'); return; }
+  try { if (recog) recog.abort(); } catch (e) {}
+  listening = false;
+  $('micBtn').classList.remove('listening');
+  if (promptText) { speak(promptText); toast(promptText); }
+  setTimeout(() => {
+    const r = new SR();
+    r.lang = 'ko-KR'; r.interimResults = false; r.maxAlternatives = 1;
+    const timeout = setTimeout(() => { try { r.stop(); } catch (e) {} }, 15000);
+    r.onstart = () => { listening = true; $('micBtn').classList.add('listening'); };
+    r.onend = () => { listening = false; $('micBtn').classList.remove('listening'); clearTimeout(timeout); };
+    r.onerror = () => { listening = false; $('micBtn').classList.remove('listening'); clearTimeout(timeout); };
+    r.onresult = e => {
+      clearTimeout(timeout);
+      try { r.stop(); } catch (e2) {}
+      cb(e.results[0][0].transcript);
+    };
+    try { r.start(); } catch (e) {}
+  }, 800);
+}
+// "경유지 추가" 음성 플로우
+async function waypointAddFlow() {
+  if (!state.lastRoute) {
+    toast('먼저 목적지를 검색해 주세요.');
+    speak('먼저 목적지를 검색해 주세요.');
+    return;
+  }
+  listenOnce(async (text) => {
+    $('cmdInput').value = text;
+    await addWaypointByName(text);
+  }, '어디를 경유할까요?');
+}
+async function addWaypointByName(name) {
+  name = (name || '').trim();
+  if (!name) { speak('장소를 말씀해 주세요.'); return; }
+  toast('"' + name + '" 검색 중…');
+  const near = state.myLoc || await getGPS(6000);
+  const g = await geocode(name, near);
+  if (!g) {
+    speak('장소를 찾지 못했어요.');
+    toast('"' + name + '"을 찾지 못했어요.');
+    return;
+  }
+  state.waypoints.push({ lat: g.lat, lng: g.lng, name: g.name });
+  speak(g.name + '을 경유지로 추가했어요.');
+  toast('경유지 추가: ' + g.name);
+  if (state.lastRoute) await recalcWithWaypoints();
+  else toast('경유지가 저장됐어요. 목적지를 검색하면 반영됩니다.');
+}
+// 경유지 반영해서 현재 경로 다시 계산
+async function recalcWithWaypoints() {
+  const lr = state.lastRoute;
+  if (!lr) return;
+  busy = true;
+  try {
+    sheetLoading('경유지 반영 중…');
+    const route = await fetchRouteVia(lr.from, state.waypoints, lr.to, lr.mode);
+    showSingleRoute(lr.from, lr.to, lr.mode, route, { quiet: false });
+  } catch (e) {
+    sheetError('경유지 경로를 찾지 못했어요.');
+    speak('경유지 경로를 찾지 못했어요.');
+  } finally { busy = false; }
+}
+// 구간별 경로 계산 후 합성 (모든 엔진 공통)
+async function fetchRouteVia(from, waypoints, to, mode) {
+  const stops = [from, ...waypoints, to];
+  let points = [], distance = 0, duration = 0, steps = [], targets = [];
+  let base = null;
+  for (let i = 0; i < stops.length - 1; i++) {
+    const leg = await fetchRoute(stops[i], stops[i + 1], mode);
+    if (!leg || !leg.points || leg.points.length < 2) throw new Error('no-route');
+    points = points.concat(i === 0 ? leg.points : leg.points.slice(1));
+    distance += leg.distance || 0;
+    duration += leg.duration || 0;
+    if (leg.steps) steps = steps.concat(leg.steps);
+    if (leg.targets) targets = targets.concat(leg.targets);
+    if (i === 0) base = leg;
+  }
+  return Object.assign({}, base, { points, distance, duration, steps, targets, viaNames: waypoints.map(w => w.name) });
 }
 /* 자동차 경로 옵션 선택: 해당 옵션으로 지도+시트 갱신 */
 function selectCarOption(idx, from, to, opts) {
@@ -1558,6 +1682,11 @@ function showSingleRoute(from, to, mode, route, opts) {
   state.adapter.clearMarkers();
   state.adapter.clearRoute();
   state.adapter.addMarker(from.lat, from.lng, { label: '출발: ' + from.name });
+  // 경유지 마커
+  (route.viaNames || []).forEach((wn, i) => {
+    const w = state.waypoints[i];
+    if (w) state.adapter.addMarker(w.lat, w.lng, { label: '경유' + (i + 1) + ': ' + wn });
+  });
   state.adapter.addMarker(to.lat, to.lng, { label: '도착: ' + to.name });
   state.adapter.drawRoute(route.carPoints || route.points, route.walkPoints, route.carTraffic);
   $('clearBtn').classList.add('on');
@@ -1603,6 +1732,10 @@ function showSingleRoute(from, to, mode, route, opts) {
     openSheet(
       '<h3>' + from.name + ' → ' + to.name + '</h3>' +
       routeOpts +
+      ((route.viaNames && route.viaNames.length)
+        ? '<div class="hint">📍 경유: ' + route.viaNames.join(' → ') +
+          ' <button class="chip" id="viaClear" style="margin-left:6px">경유지 삭제</button></div>'
+        : '') +
       '<div class="meta"><span>거리 <b>' + fmtDist(route.distance) + '</b></span>' +
       '<span>예상 <b>' + fmtTime(route.duration) + '</b> · ' + fmtEta(route.duration) + '</span>' +
       '<span>' + modeLabel + '</span></div>' +
@@ -1626,6 +1759,11 @@ function showSingleRoute(from, to, mode, route, opts) {
     if ($('altRoutes')) $('altRoutes').onclick = () => {
       if ($('altRoutes').dataset.kind === 'bike') loadBikeOptions(from, to, opts);
       else loadCarOptions(from, to, opts);
+    };
+    if ($('viaClear')) $('viaClear').onclick = () => {
+      state.waypoints = [];
+      toast('경유지를 삭제했어요.');
+      recalcWithWaypoints();
     };
     // 카카오맵 자전거 길찾기 (공식 URL 스킴 by=bicycle — 카카오 자전거도로 DB 사용)
     if ($('kakaoBike')) $('kakaoBike').onclick = () => {
@@ -1753,6 +1891,7 @@ async function routeToPoi(idx) {
   if (!list || !list[idx]) return;
   const dest = list[idx];
   state.poiList = null;
+  state.waypoints = [];
   closeSheet();
   // 이동수단 선택 단계로: 목적지 저장 후 음성으로 물어봄
   state.pendingPoiDest = dest;
@@ -1807,11 +1946,10 @@ function handleModeSelection(text) {
   if (!dest) return;
   let mode = null;
   if (/자동차|차로|운전/.test(text)) mode = 'car';
-  else if (/자전거/.test(text)) mode = 'bike';
-  else if (/도보|걸어서/.test(text)) mode = 'walk';
+  else if (/자전거|바이크/.test(text)) mode = 'bike';
+  else if (/도보|걸어서|걷기/.test(text)) mode = 'walk';
   if (mode) {
-    state.pendingPoiDest = null;
-    startPoiNavigation(mode);
+    startPoiNavigation(mode, dest);
   } else {
     // 못 알아들으면 다시 듣기
     speak('도보, 자동차, 자전거 중에서 말씀하세요.');
@@ -1819,8 +1957,8 @@ function handleModeSelection(text) {
   }
 }
 // POI 내비게이션 시작
-async function startPoiNavigation(mode) {
-  const dest = state.pendingPoiDest;
+async function startPoiNavigation(mode, dest) {
+  dest = dest || state.pendingPoiDest;
   if (!dest) return;
   state.pendingPoiDest = null;
   state.wantModeListen = false;
@@ -2193,10 +2331,11 @@ function updateHeadingFromGPS(lat, lng) {
 
 /* ================= 음성 입력 ================= */
 let recog = null, listening = false;
-function toggleMic() {
+/* 음성 인식 시작 (공통) */
+function startListening() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) { toast('이 브라우저는 음성 인식을 지원하지 않습니다.'); return; }
-  if (listening && recog) { try { recog.stop(); } catch (e) {} return; }
+  if (!SR) { toast('이 브라우저는 음성 인식을 지원하지 않습니다.'); return false; }
+  if (listening && recog) { try { recog.stop(); } catch (e) {} return false; }
   // TTS가 읽는 중이면 중단 (iOS는 TTS+음성인식 동시 불가)
   try { speechSynthesis.cancel(); } catch (e) {}
   recog = new SR();
@@ -2210,7 +2349,11 @@ function toggleMic() {
     state.lastQuery = text;
     handleCommand(text);
   };
-  try { recog.start(); } catch (e) {}
+  try { recog.start(); return true; } catch (e) { return false; }
+}
+function toggleMic() {
+  if (listening && recog) { try { recog.stop(); } catch (e) {} return; }
+  startListening();
 }
 
 /* ================= 설정 UI ================= */
@@ -2219,14 +2362,54 @@ function renderPlaces() {
   const names = Object.keys(state.savedPlaces);
   box.innerHTML = names.length
     ? names.map(n => '<div class="place-row"><span>📍 ' + n + '</span>' +
+      '<button class="edit" data-n="' + n + '">수정</button>' +
       '<button class="del" data-n="' + n + '">삭제</button></div>').join('')
     : '<div class="hint">등록된 장소가 없습니다.</div>';
   box.querySelectorAll('.del').forEach(b => {
     b.onclick = () => { delete state.savedPlaces[b.dataset.n]; saveSavedPlaces(); renderPlaces(); };
   });
+  box.querySelectorAll('.edit').forEach(b => {
+    b.onclick = () => editPlace(b.dataset.n);
+  });
+}
+// 저장 장소 수정: 이름/주소를 입력칸에 채워 수정 모드로
+let editingPlace = null;
+function editPlace(name) {
+  const p = state.savedPlaces[name];
+  if (!p) return;
+  editingPlace = name;
+  $('placeName').value = name;
+  $('placeAddr').value = '';
+  $('placeAddr').placeholder = '새 주소 (비우면 좌표 유지)';
+  $('placeAdd').textContent = '수정 완료';
+  toast('"' + name + '" 수정 중 — 주소 입력 후 "수정 완료"');
 }
 async function addPlace() {
   const name = $('placeName').value.trim(), addr = $('placeAddr').value.trim();
+  // 수정 모드
+  if (editingPlace) {
+    const p = state.savedPlaces[editingPlace];
+    if (!p) { editingPlace = null; return; }
+    if (addr) {
+      toast('주소 검색 중…');
+      const g = await geocode(addr, state.myLoc);
+      if (!g) { toast('주소를 찾지 못했어요.'); return; }
+      p.lat = g.lat; p.lng = g.lng;
+    }
+    if (name && name !== editingPlace) {
+      delete state.savedPlaces[editingPlace];
+      state.savedPlaces[name] = p;
+      p.name = name;
+    }
+    saveSavedPlaces(); renderPlaces();
+    editingPlace = null;
+    $('placeName').value = ''; $('placeAddr').value = '';
+    $('placeAddr').placeholder = '주소 (예: 세종대로 110)';
+    $('placeAdd').textContent = '추가';
+    toast('수정됐어요.');
+    return;
+  }
+  // 신규 추가
   if (!name || !addr) { toast('이름과 주소를 입력해 주세요.'); return; }
   toast('주소 검색 중…');
   const g = await geocode(addr, state.myLoc);
@@ -2235,6 +2418,58 @@ async function addPlace() {
   saveSavedPlaces(); renderPlaces();
   $('placeName').value = ''; $('placeAddr').value = '';
   toast('"' + name + '" 저장됨');
+}
+// 지도에서 직접 찍어서 저장 장소 추가
+let pickingPlace = false;
+function pickPlaceOnMap() {
+  const name = $('placeName').value.trim();
+  if (!name) { toast('먼저 이름을 입력해 주세요.'); $('placeName').focus(); return; }
+  pickingPlace = true;
+  closeSettings();
+  toast('지도에서 원하는 위치를 탭하세요', 4000);
+  speak('지도에서 원하는 위치를 탭하세요.');
+  state.adapter.onMapClick((lat, lng) => {
+    if (!pickingPlace) return;
+    pickingPlace = false;
+    state.adapter.onMapClick(null);
+    const nm = $('placeName').value.trim() || name;
+    state.savedPlaces[nm] = { lat, lng, name: nm };
+    saveSavedPlaces();
+    toast('"' + nm + '" 저장됨');
+    speak(nm + ' 저장됐어요.');
+    openSettings();
+  });
+}
+// 음성으로 현위치 저장: "현위치 저장" → 이름 묻기
+async function voiceSaveCurrentPlace() {
+  listenOnce(async (text) => {
+    $('cmdInput').value = text;
+    await saveCurrentAs(text);
+  }, '어떤 이름으로 저장할까요?');
+}
+async function saveCurrentAs(name) {
+  name = (name || '').trim().replace(/(으)로\s*저장.*$/, '');
+  if (!name) { speak('이름을 말씀해 주세요.'); return; }
+  toast('현위치 가져오는 중…');
+  const p = state.myLoc || await getGPS(8000);
+  if (!p) { speak('현위치를 가져오지 못했어요.'); toast('현위치를 가져오지 못했어요.'); return; }
+  state.savedPlaces[name] = { lat: p.lat, lng: p.lng, name };
+  saveSavedPlaces();
+  speak(name + ' 저장됐어요.');
+  toast('"' + name + '" 현위치로 저장됨');
+}
+// 현위치를 저장 장소로 추가 (설정 UI용)
+async function savePlaceAtCurrentLoc() {
+  const name = $('placeName').value.trim();
+  if (!name) { toast('먼저 이름을 입력해 주세요.'); $('placeName').focus(); return; }
+  toast('현위치 가져오는 중…');
+  const p = state.myLoc || await getGPS(8000);
+  if (!p) { toast('현위치를 가져오지 못했어요.'); return; }
+  state.savedPlaces[name] = { lat: p.lat, lng: p.lng, name };
+  saveSavedPlaces(); renderPlaces();
+  $('placeName').value = '';
+  toast('"' + name + '" 현위치로 저장됨');
+  speak(name + ' 현위치로 저장됐어요.');
 }
 /* 경로 옵션 (설정): 자동차 searchOption / 자전거 라우팅 프로필 */
 function getRoutePref(mode) {
@@ -2280,7 +2515,12 @@ async function init() {
   $('micBtn').onclick = toggleMic;
   $('searchBtn').onclick = () => { const t = $('cmdInput').value.trim(); if (t) { state.lastQuery = t; handleCommand(t); } };
   $('cmdInput').addEventListener('keydown', e => { if (e.key === 'Enter') { const t = e.target.value.trim(); if (t) { state.lastQuery = t; handleCommand(t); } } });
-  $('cmdInput').addEventListener('focus', () => { if (!$('cmdInput').value.trim()) renderHistory(); });
+  $('cmdInput').addEventListener('focus', () => {
+    // 직접 입력 모드: 마이크 끄기
+    if (listening && recog) { try { recog.stop(); } catch (e) {} }
+    state.wantModeListen = false;
+    if (!$('cmdInput').value.trim()) renderHistory();
+  });
   $('cmdInput').addEventListener('blur', () => { setTimeout(() => $('history').classList.remove('on'), 150); });
   const syncInputClear = () => $('inputClear').classList.toggle('on', !!$('cmdInput').value);
   $('cmdInput').addEventListener('input', () => { syncInputClear(); $('history').classList.remove('on'); });
@@ -2298,6 +2538,8 @@ async function init() {
   document.querySelectorAll('#bikePrefChips .chip').forEach(c => c.onclick = () => { try { localStorage.setItem('route_pref_bike', c.dataset.v); } catch (e) {} renderPrefChips(); toast('자전거 기본 경로: ' + c.textContent); });
   $('settingsModal').addEventListener('click', e => { if (e.target.id === 'settingsModal') closeSettings(); });
   $('placeAdd').onclick = addPlace;
+  $('placePickMap').onclick = pickPlaceOnMap;
+  $('placeUseLoc').onclick = savePlaceAtCurrentLoc;
   $('tmapKey').value = localStorage.getItem('tmap_key') || '';
   $('tmapSave').onclick = async () => {
     const v = $('tmapKey').value.trim();
@@ -2336,6 +2578,8 @@ async function init() {
   state.adapter.onUserDrag(() => { if (state.follow) exitFollow(); });
   const p = await getGPS(6000);
   if (p) { state.adapter.setCenter(p.lat, p.lng); state.adapter.setUserLocation(p.lat, p.lng); }
+  // 앱 실행 시 마이크 자동 활성화 (음성 우선 UX)
+  setTimeout(() => { startListening(); }, 1200);
 }
 document.addEventListener('DOMContentLoaded', init);
 </script>
