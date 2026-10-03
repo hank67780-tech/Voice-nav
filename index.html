@@ -314,6 +314,7 @@ const state = {
   savedPlaces: {},        // name -> {lat,lng,name}
   mapProvider: 'kakao',
   poiList: null,          // 근처 POI 검색 결과 (번호 선택용)
+  pendingPoiDest: null,   // POI 선택 후 이동수단 대기 중 목적지
 };
 
 /* ================= 유틸 ================= */
@@ -1747,18 +1748,75 @@ async function routeToPoi(idx) {
   const dest = list[idx];
   state.poiList = null;
   closeSheet();
+  // 이동수단 선택 단계로: 목적지 저장 후 음성으로 물어봄
+  state.pendingPoiDest = dest;
+  speak('어떤 이동수단으로 안내할까요? 도보, 자동차, 자전거 중에서 말씀하세요.');
+  openSheet('<h3>' + dest.name + '(으)로 안내</h3>' +
+    '<div class="hint">이동수단을 선택하세요</div>' +
+    '<div class="btnrow" style="display:flex;gap:8px;margin-top:12px">' +
+    '<button class="btn" data-mode="walk" style="flex:1">도보</button>' +
+    '<button class="btn" data-mode="car" style="flex:1">자동차</button>' +
+    '<button class="btn" data-mode="bike" style="flex:1">자전거</button>' +
+    '</div><div class="btnrow"><button class="btn ghost" onclick="closeSheet()">닫기</button></div>');
+  document.querySelectorAll('[data-mode]').forEach(el => {
+    el.addEventListener('click', () => startPoiNavigation(el.dataset.mode));
+  });
+  // 음성으로 이동수단 듣기
+  setTimeout(() => autoListenForMode(), 2500);
+}
+// POI 이동수단 음성 듣기
+function autoListenForMode() {
+  if (!state.pendingPoiDest) return;
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR || listening) return;
+  recog = new SR();
+  recog.lang = 'ko-KR'; recog.interimResults = false; recog.maxAlternatives = 1;
+  const timeout = setTimeout(() => { try { recog.stop(); } catch (e) {} }, 10000);
+  recog.onstart = () => { listening = true; $('micBtn').classList.add('listening'); };
+  recog.onend = () => { listening = false; $('micBtn').classList.remove('listening'); clearTimeout(timeout); };
+  recog.onerror = () => { listening = false; $('micBtn').classList.remove('listening'); clearTimeout(timeout); };
+  recog.onresult = e => {
+    clearTimeout(timeout);
+    const text = e.results[0][0].transcript;
+    $('cmdInput').value = text;
+    handleModeSelection(text);
+  };
+  try { recog.start(); toast('이동수단을 말씀하세요'); } catch (e) {}
+}
+// 이동수단 선택 처리
+function handleModeSelection(text) {
+  const dest = state.pendingPoiDest;
+  if (!dest) return;
+  let mode = null;
+  if (/자동차|차로|운전/.test(text)) mode = 'car';
+  else if (/자전거/.test(text)) mode = 'bike';
+  else if (/도보|걸어서/.test(text)) mode = 'walk';
+  if (mode) {
+    state.pendingPoiDest = null;
+    startPoiNavigation(mode);
+  } else {
+    // 못 알아들으면 다시 듣기
+    speak('도보, 자동차, 자전거 중에서 말씀하세요.');
+    setTimeout(() => autoListenForMode(), 2000);
+  }
+}
+// POI 내비게이션 시작
+async function startPoiNavigation(mode) {
+  const dest = state.pendingPoiDest;
+  if (!dest) return;
+  state.pendingPoiDest = null;
+  closeSheet();
   busy = true;
   try {
     const near = state.myLoc || await getGPS(8000);
     if (!near) throw new Error('no-gps');
     const from = { lat: near.lat, lng: near.lng, name: '현재 위치' };
     const to = { lat: dest.lat, lng: dest.lng, name: dest.name };
-    // 기본 도보 모드로 경로 표시 (사용자가 카드에서 변경 가능)
-    await showRoute(from, to, 'walk');
+    await showRoute(from, to, mode);
+    // 경로 표시 후 바로 길안내 시작
+    setTimeout(() => { try { startNavigation(); } catch (e) {} }, 800);
   } catch (e) {
-    const msg = String(e.message || e);
-    if (msg === 'no-gps') sheetError('현재 위치를 가져오지 못했어요.');
-    else sheetError('경로를 찾지 못했어요.');
+    sheetError('경로를 찾지 못했어요.');
     speak('검색하지 못했어요.');
   } finally { busy = false; }
 }
