@@ -1695,7 +1695,8 @@ async function findNearbyPoi(cat) {
     el.addEventListener('click', () => routeToPoi(parseInt(el.dataset.idx, 10)));
   });
   const names = list.slice(0, 3).map((p, i) => (i + 1) + '번 ' + p.name).join(', ');
-  speak('근처 ' + cat.label + ' ' + list.length + '곳을 찾았어요. ' + names + '. 원하는 번호를 말하거나 탭하세요.');
+  // TTS는 짧게 (마이크 탭하면 중단됨)
+  speak('근처 ' + cat.label + ' ' + list.length + '곳. ' + names);
 }
 // 하위 호환: 기존 화장실 검색은 새 함수로 위임
 async function findRestrooms() {
@@ -2081,6 +2082,8 @@ function toggleMic() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) { toast('이 브라우저는 음성 인식을 지원하지 않습니다.'); return; }
   if (listening && recog) { try { recog.stop(); } catch (e) {} return; }
+  // TTS가 읽는 중이면 중단 (iOS는 TTS+음성인식 동시 불가)
+  try { speechSynthesis.cancel(); } catch (e) {}
   recog = new SR();
   recog.lang = 'ko-KR'; recog.interimResults = false; recog.maxAlternatives = 1;
   recog.onstart = () => { listening = true; $('micBtn').classList.add('listening'); };
