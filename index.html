@@ -1695,9 +1695,10 @@ async function findNearbyPoi(cat) {
     el.addEventListener('click', () => routeToPoi(parseInt(el.dataset.idx, 10)));
   });
   const names = list.slice(0, 3).map((p, i) => (i + 1) + '번 ' + p.name).join(', ');
-  // 결과는 화면에 표시, 음성은 짧게 "몇 번으로 안내할까요?"만
-  speakWithCallback('근처 ' + cat.label + ' ' + list.length + '곳 찾았어요. 몇 번으로 안내할까요?',
-    () => autoListenForPoi());
+  // 결과는 화면에 표시, 음성은 짧게 "몇 번으로 안내할까요?"만 (기존 speak 사용)
+  speak('근처 ' + cat.label + ' ' + list.length + '곳 찾았어요. 몇 번으로 안내할까요?');
+  // 3초 후 자동 듣기 시작 (TTS onend가 iOS에서 불안정해서 타이머 사용)
+  setTimeout(() => autoListenForPoi(), 3000);
 }
 // TTS 완료 후 콜백 (실패해도 콜백은 실행)
 function speakWithCallback(text, cb) {
