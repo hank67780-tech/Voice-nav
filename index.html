@@ -1690,9 +1690,9 @@ async function findNearbyPoi(cat) {
       '<b>' + (i + 1) + '.</b> ' + p.name + ' <span style="color:var(--muted)">(' + fmtDist(haversineM(near, p)) + ')</span></div>').join('') +
     '</div><div class="hint" style="margin-top:8px">원하는 곳을 탭하거나 "1번"이라고 말해 보세요.</div>' +
     '<div class="btnrow"><button class="btn ghost" onclick="closeSheet()">닫기</button></div>');
-  // 탭으로 선택
+  // 탭으로 선택 (iOS 대응: addEventListener 사용)
   document.querySelectorAll('.poi-row').forEach(el => {
-    el.onclick = () => routeToPoi(parseInt(el.dataset.idx, 10));
+    el.addEventListener('click', () => routeToPoi(parseInt(el.dataset.idx, 10)));
   });
   const names = list.slice(0, 3).map((p, i) => (i + 1) + '번 ' + p.name).join(', ');
   speak('근처 ' + cat.label + ' ' + list.length + '곳을 찾았어요. ' + names + '. 원하는 번호를 말하거나 탭하세요.');
@@ -1702,16 +1702,27 @@ async function findRestrooms() {
   const cat = POI_CATEGORIES.find(c => c.label === '화장실');
   return findNearbyPoi(cat);
 }
-// POI 선택 → 경로 탐색
+// POI 선택 → 경로 탐색 (좌표 직접 사용, 재검색 안 함)
 async function routeToPoi(idx) {
   const list = state.poiList;
   if (!list || !list[idx]) return;
   const dest = list[idx];
   state.poiList = null;
   closeSheet();
-  busy = false; // handleCommand 재진입을 위해 해제
-  // 기존 경로 탐색 흐름 재사용: "현재 위치에서 {장소}까지"
-  await handleCommand('현재 위치에서 ' + dest.name + '까지');
+  busy = true;
+  try {
+    const near = state.myLoc || await getGPS(8000);
+    if (!near) throw new Error('no-gps');
+    const from = { lat: near.lat, lng: near.lng, name: '현재 위치' };
+    const to = { lat: dest.lat, lng: dest.lng, name: dest.name };
+    // 기본 도보 모드로 경로 표시 (사용자가 카드에서 변경 가능)
+    await showRoute(from, to, 'walk');
+  } catch (e) {
+    const msg = String(e.message || e);
+    if (msg === 'no-gps') sheetError('현재 위치를 가져오지 못했어요.');
+    else sheetError('경로를 찾지 못했어요.');
+    speak('검색하지 못했어요.');
+  } finally { busy = false; }
 }
 
 /* ================= 길안내 모드 ================= */
