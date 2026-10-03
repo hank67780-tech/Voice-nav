@@ -1763,30 +1763,36 @@ async function routeToPoi(idx) {
     '<button class="btn" onclick="startPoiNavigation(\'car\')" style="flex:1">자동차</button>' +
     '<button class="btn" onclick="startPoiNavigation(\'bike\')" style="flex:1">자전거</button>' +
     '</div><div class="btnrow"><button class="btn ghost" onclick="closeSheet()">닫기</button></div>');
-  // 음성으로 이동수단 듣기
-  setTimeout(() => autoListenForMode(), 2500);
+  // 음성으로 이동수단 듣기 (즉시 시작)
+  autoListenForMode();
 }
 // POI 이동수단 음성 듣기
 function autoListenForMode() {
   if (!state.pendingPoiDest) return;
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) return;
+  if (!SR) { toast('음성 인식을 지원하지 않습니다'); return; }
   // 기존 인식 중이면 중단
-  if (listening && recog) { try { recog.stop(); } catch (e) {} }
+  try { if (recog) recog.abort(); } catch (e) {}
   listening = false;
+  $('micBtn').classList.remove('listening');
   recog = new SR();
   recog.lang = 'ko-KR'; recog.interimResults = false; recog.maxAlternatives = 1;
-  const timeout = setTimeout(() => { try { recog.stop(); } catch (e) {} }, 10000);
+  const timeout = setTimeout(() => { try { recog.stop(); } catch (e) {} }, 12000);
   recog.onstart = () => { listening = true; $('micBtn').classList.add('listening'); };
   recog.onend = () => { listening = false; $('micBtn').classList.remove('listening'); clearTimeout(timeout); };
-  recog.onerror = () => { listening = false; $('micBtn').classList.remove('listening'); clearTimeout(timeout); };
+  recog.onerror = (e) => { listening = false; $('micBtn').classList.remove('listening'); clearTimeout(timeout); };
   recog.onresult = e => {
     clearTimeout(timeout);
     const text = e.results[0][0].transcript;
     $('cmdInput').value = text;
     handleModeSelection(text);
   };
-  try { recog.start(); toast('이동수단을 말씀하세요'); } catch (e) {}
+  try {
+    recog.start();
+    toast('이동수단을 말씀하세요 (도보/자동차/자전거)', 3000);
+  } catch (e) {
+    toast('음성 인식 시작 실패');
+  }
 }
 // 이동수단 선택 처리
 function handleModeSelection(text) {
