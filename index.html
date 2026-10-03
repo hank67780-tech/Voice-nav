@@ -313,6 +313,7 @@ const state = {
   routeOptIdx: 0,         // 선택된 옵션 인덱스
   savedPlaces: {},        // name -> {lat,lng,name}
   mapProvider: 'kakao',
+  poiList: null,          // 근처 POI 검색 결과 (번호 선택용)
 };
 
 /* ================= 유틸 ================= */
@@ -837,9 +838,53 @@ const MODE_KEYWORDS = [
 ];
 const MODE_LABEL = { walk: '도보', car: '자동차', bike: '자전거', bus: '버스', subway: '지하철', transit: '대중교통' };
 
+/* ================= 근처 POI 카테고리 ================= */
+const POI_CATEGORIES = [
+  { kws: ['주유소'], label: '주유소', query: '주유소' },
+  { kws: ['편의점'], label: '편의점', query: '편의점' },
+  { kws: ['약국'], label: '약국', query: '약국' },
+  { kws: ['식당', '맛집', '밥집'], label: '식당', query: '식당' },
+  { kws: ['카페'], label: '카페', query: '카페' },
+  { kws: ['화장실'], label: '화장실', query: '화장실' },
+  { kws: ['병원'], label: '병원', query: '병원' },
+  { kws: ['은행', 'ATM'], label: '은행', query: '은행' },
+  { kws: ['주차장'], label: '주차장', query: '주차장' },
+  { kws: ['마트'], label: '마트', query: '마트' },
+];
+const POI_ORDINALS = ['첫번째', '첫 번째', '두번째', '두 번째', '세번째', '세 번째', '네번째', '네 번째', '다섯번째', '다섯 번째'];
+
 function parseCommand(text) {
   let t = (text || '').trim();
   if (!t) return null;
+  // POI 목록에서 번호 선택 ("1번", "첫번째" 등)
+  if (state.poiList && state.poiList.length) {
+    let m = t.match(/(\d+)\s*번/);
+    if (m) {
+      const idx = parseInt(m[1], 10) - 1;
+      if (idx >= 0 && idx < state.poiList.length) return { selectPoi: idx, raw: text };
+    }
+    const oi = POI_ORDINALS.indexOf(t.replace(/\s+/g, ''));
+    if (oi >= 0) {
+      const idx = Math.floor(oi / 2);
+      if (idx < state.poiList.length) return { selectPoi: idx, raw: text };
+    }
+    // POI 목록이 떠 있는 상태에서 다른 명령이면 목록 초기화
+    if (!/^\d+\s*번$/.test(t)) state.poiList = null;
+  }
+  // 근처 POI 검색: "근처 주유소", "주유소 찾아줘", "주유소" 등
+  // 단, "주유소까지"처럼 목적지가 명확하면 기존 경로 탐색으로 넘김
+  if (!/(까지|으로|로)$/.test(t.replace(/\s+/g, ''))) {
+    for (const cat of POI_CATEGORIES) {
+      for (const kw of cat.kws) {
+        if (t.includes(kw)) {
+          // "근처/주변/가까운"이 있거나, 카테고리 단독/짧은 문장이면 근처 검색
+          if (/(근처|주변|가까운|근방|주위에)/.test(t) || t.replace(/\s+/g, '').length <= kw.length + 4) {
+            return { nearbyPoi: cat, raw: text };
+          }
+        }
+      }
+    }
+  }
   if (/화장실/.test(t)) return { restroom: true, raw: text };
   let mode = 'walk', rest = t;
   for (const m of MODE_KEYWORDS) {
@@ -1366,14 +1411,16 @@ let busy = false;
 async function handleCommand(text) {
   if (busy) { toast('처리 중입니다. 잠시만요.'); return; }
   const parsed = parseCommand(text);
-  if (!parsed || (!parsed.restroom && !parsed.to)) {
-    sheetError('목적지를 알아듣지 못했어요.<br>예) "강남역까지 걸어서", "우리집에서 회사까지 버스로"');
+  if (!parsed || (!parsed.restroom && !parsed.to && !parsed.nearbyPoi && parsed.selectPoi === undefined)) {
+    sheetError('목적지를 알아듣지 못했어요.<br>예) "강남역까지 걸어서", "근처 주유소", "우리집에서 회사까지 버스로"');
     speak('목적지를 알아듣지 못했어요.');
     return;
   }
   busy = true;
   try {
     if (parsed.restroom) { await findRestrooms(); return; }
+    if (parsed.nearbyPoi) { await findNearbyPoi(parsed.nearbyPoi); return; }
+    if (parsed.selectPoi !== undefined) { await routeToPoi(parsed.selectPoi); return; }
     sheetLoading('"' + parsed.to + '" 검색 중…');
     const near = state.myLoc || await getGPS(6000);
 
@@ -1617,28 +1664,54 @@ function showTransit(from, to, mode) {
   speak(MODE_LABEL[mode] + ' 경로는 지도 앱에서 확인해 주세요.');
 }
 
-/* ================= 근처 화장실 ================= */
-async function findRestrooms() {
-  sheetLoading('근처 화장실 검색 중…');
+/* ================= 근처 POI 검색 ================= */
+async function findNearbyPoi(cat) {
+  sheetLoading('근처 ' + cat.label + ' 검색 중…');
   const near = state.myLoc || await getGPS(8000);
   if (!near) { sheetError('현재 위치를 가져오지 못했어요.'); return; }
   let list = [];
   if (state.kakaoReady && state.adapter instanceof KakaoAdapter) {
-    try { list = await state.adapter.searchKeywordList('화장실', near, 8); } catch (e) {}
+    try { list = await state.adapter.searchKeywordList(cat.query, near, 8); } catch (e) {}
   }
   if (!list.length) {
-    const r = await nominatimSearch('화장실', near);
+    const r = await nominatimSearch(cat.query, near);
     if (r) list = [r];
   }
   state.adapter.clearMarkers(); state.adapter.clearRoute();
   state.adapter.setCenter(near.lat, near.lng);
   state.adapter.addMarker(near.lat, near.lng, { label: '현재 위치' });
-  if (!list.length) { sheetError('근처 화장실을 찾지 못했어요.'); return; }
+  if (!list.length) { sheetError('근처 ' + cat.label + '을(를) 찾지 못했어요.'); state.poiList = null; return; }
+  // 거리순 정렬 (카카오가 거리순으로 주지만念위해)
+  list.sort((a, b) => haversineM(near, a) - haversineM(near, b));
+  state.poiList = list;
   list.forEach((p, i) => state.adapter.addMarker(p.lat, p.lng, { label: (i + 1) + '. ' + p.name }));
-  openSheet('<h3>근처 화장실 ' + list.length + '곳</h3><div class="route-line">' +
-    list.map((p, i) => '<div><b>' + (i + 1) + '.</b> ' + p.name + ' <span style="color:var(--muted)">(' + fmtDist(haversineM(near, p)) + ')</span></div>').join('') +
-    '</div><div class="btnrow"><button class="btn ghost" onclick="closeSheet()">닫기</button></div>');
-  speak('근처 화장실 ' + list.length + '곳을 찾았어요.');
+  openSheet('<h3>근처 ' + cat.label + ' ' + list.length + '곳</h3><div class="route-line">' +
+    list.map((p, i) => '<div class="poi-row" data-idx="' + i + '" style="padding:10px 4px;border-bottom:1px solid var(--line);cursor:pointer">' +
+      '<b>' + (i + 1) + '.</b> ' + p.name + ' <span style="color:var(--muted)">(' + fmtDist(haversineM(near, p)) + ')</span></div>').join('') +
+    '</div><div class="hint" style="margin-top:8px">원하는 곳을 탭하거나 "1번"이라고 말해 보세요.</div>' +
+    '<div class="btnrow"><button class="btn ghost" onclick="closeSheet()">닫기</button></div>');
+  // 탭으로 선택
+  document.querySelectorAll('.poi-row').forEach(el => {
+    el.onclick = () => routeToPoi(parseInt(el.dataset.idx, 10));
+  });
+  const names = list.slice(0, 3).map((p, i) => (i + 1) + '번 ' + p.name).join(', ');
+  speak('근처 ' + cat.label + ' ' + list.length + '곳을 찾았어요. ' + names + '. 원하는 번호를 말하거나 탭하세요.');
+}
+// 하위 호환: 기존 화장실 검색은 새 함수로 위임
+async function findRestrooms() {
+  const cat = POI_CATEGORIES.find(c => c.label === '화장실');
+  return findNearbyPoi(cat);
+}
+// POI 선택 → 경로 탐색
+async function routeToPoi(idx) {
+  const list = state.poiList;
+  if (!list || !list[idx]) return;
+  const dest = list[idx];
+  state.poiList = null;
+  closeSheet();
+  busy = false; // handleCommand 재진입을 위해 해제
+  // 기존 경로 탐색 흐름 재사용: "현재 위치에서 {장소}까지"
+  await handleCommand('현재 위치에서 ' + dest.name + '까지');
 }
 
 /* ================= 길안내 모드 ================= */
