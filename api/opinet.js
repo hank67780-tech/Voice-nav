@@ -3,13 +3,15 @@
 // 키는 쿼리로 전달받아 그대로 전달하고, 서버에 저장/기록하지 않음.
 export default async function handler(req, res) {
   const q = req.query || {};
-  const { code, x, y } = q;
-  if (!code || !x || !y) {
+  // 오피넷 공식 파라미터명은 certkey (구 code도 하위호환으로 받음)
+  const certkey = q.certkey || q.code;
+  const { x, y } = q;
+  if (!certkey || !x || !y) {
     return res.status(400).json({ error: 'missing params' });
   }
   try {
     const url = 'https://www.opinet.co.kr/api/aroundAll.do'
-      + '?code=' + encodeURIComponent(code)
+      + '?certkey=' + encodeURIComponent(certkey)
       + '&x=' + encodeURIComponent(x)
       + '&y=' + encodeURIComponent(y)
       + '&radius=' + encodeURIComponent(q.radius || '3000')
